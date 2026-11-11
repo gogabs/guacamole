@@ -55,6 +55,10 @@ var _choice_index := 0
 var _choice_done: Callable
 
 
+func focus_zone() -> Control:
+	return _zone
+
+
 func setup(client: Node, you: Dictionary) -> void:
 	_client = client
 	_you_name = str(you.get("name", ""))
@@ -73,6 +77,7 @@ func _ready() -> void:
 	_view = RichTextLabel.new()
 	_view.bbcode_enabled = true
 	_view.focus_mode = Control.FOCUS_NONE
+	_view.scroll_active = false
 	_view.mouse_filter = Control.MOUSE_FILTER_PASS
 	_zone.add_child(_view)
 

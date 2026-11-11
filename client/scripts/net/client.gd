@@ -8,6 +8,7 @@ signal presence_changed(players: Array)
 signal room_changed(room: Dictionary)
 signal sheet_changed(character: Dictionary)
 signal sheet_removed(character_id: String)
+signal scene_changed(scene: Dictionary)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -17,6 +18,8 @@ var you: Dictionary = {}
 var room: Dictionary = {}
 var players: Array = []
 var templates: Array = []
+## Estado da cena: {scenes, activeId, editors}.
+var scene: Dictionary = {}
 ## Fichas da mesa por id.
 var characters: Dictionary = {}
 
@@ -110,6 +113,10 @@ func roll_field(character_id: String, field_id: String, track_id: String = "", p
 	_send(message)
 
 
+func scene_op(op: Dictionary) -> void:
+	_send({"type": "scene:op", "op": op})
+
+
 func burn_momentum(character_id: String) -> void:
 	_send({"type": "sheet:burn", "characterId": character_id})
 
@@ -123,6 +130,7 @@ func leave() -> void:
 	room = {}
 	players = []
 	templates = []
+	scene = {}
 	characters = {}
 
 
@@ -158,6 +166,7 @@ func _handle(raw: String) -> void:
 			room = message["room"]
 			players = message["players"]
 			templates = message.get("templates", [])
+			scene = message.get("scene", {})
 			characters = {}
 			for character in message.get("characters", []):
 				characters[character["id"]] = character
@@ -171,6 +180,9 @@ func _handle(raw: String) -> void:
 			var character: Dictionary = message["character"]
 			characters[character["id"]] = character
 			sheet_changed.emit(character)
+		"scene:sync":
+			scene = message["scene"]
+			scene_changed.emit(scene)
 		"sheet:removed":
 			characters.erase(message["characterId"])
 			sheet_removed.emit(str(message["characterId"]))

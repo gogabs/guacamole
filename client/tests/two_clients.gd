@@ -129,6 +129,9 @@ func _run() -> void:
 		"Caio chega na tela da mesa"
 	)
 	var table: Control = app._screen
+	await process_frame
+	await process_frame
+	_check(root.gui_get_focus_owner() == table._sheets._zone, "a mesa abre com o foco na região de fichas")
 	_check(table.entries.size() >= 1, "histórico inicial carregado")
 	_check(
 		await _wait(func() -> bool: return ana_entries.any(func(e: Dictionary) -> bool: return str(e["text"]).contains("Caio entrou"))),
@@ -164,25 +167,39 @@ func _run() -> void:
 	_check(await _wait(func() -> bool: return table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "local")), "erro vira entrada local em Caio")
 	_check(ana_errors.is_empty(), "Ana não recebe o erro de Caio")
 
-	# Navegação por teclado no histórico.
+	# O histórico não recebe foco: suas teclas valem a partir da ficha, que é a região única.
+	var sheets: Control = table._sheets
+	sheets._zone.grab_focus()
 	var last: int = table.entries.size() - 1
 	_check(table.cursor == last, "cursor começa na última entrada")
 	await _key(KEY_COMMA, KEY_COMMA, 44)
 	_check(table.cursor == last - 1, "vírgula volta uma entrada")
 	await _key(KEY_PERIOD, KEY_PERIOD, 46)
 	_check(table.cursor == last, "ponto avança uma entrada")
-	await _key(KEY_HOME, KEY_HOME)
-	_check(table.cursor == 0, "Home vai à primeira entrada")
-	await _key(KEY_END, KEY_END)
-	_check(table.cursor == last, "End vai à última entrada")
-
-	# Fichas: Tab do histórico leva à região de fichas, tudo por teclado.
-	_check(root.gui_get_focus_owner() == table._history_zone, "a mesa abre com o foco no histórico")
-	var sheets: Control = table._sheets
-	await _key(KEY_TAB, KEY_TAB)
-	_check(root.gui_get_focus_owner() == sheets._zone, "Tab leva à região de fichas")
-	_check(sheets._character_id == "" and sheets._rows.size() == 2, "sem fichas: só as opções de criar (Fate e Ironsworn)")
+	await _ctrl_key(KEY_HOME)
+	_check(table.cursor == 0, "Ctrl+Home vai à primeira entrada")
+	await _ctrl_key(KEY_END)
+	_check(table.cursor == last, "Ctrl+End vai à última entrada")
+	for i in 60:
+		table._on_server_error("linha de enchimento %d" % i)
+	await process_frame
+	await process_frame
+	await _ctrl_key(KEY_END)
+	await process_frame
+	_check(table._log.get_v_scroll_bar().value > 0, "o histórico rola até a mensagem atual mesmo sem barra de rolagem")
+	_check(not table._log.scroll_active, "o histórico não tem barra de rolagem")
+	last = table.entries.size() - 1
+	_check(not table._history_zone.has_focus() and table._history_zone.focus_mode == Control.FOCUS_NONE, "o histórico não aceita foco")
 	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_RIGHT, KEY_RIGHT)
+	_check(root.gui_get_focus_owner() == sheets._zone, "setas não tiram o foco da ficha")
+	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == table._scene._zone, "Tab vai da ficha à cena, sem passar por histórico, campo ou barras")
+	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == sheets._zone, "e volta para a ficha")
+	_check(sheets._character_id == "" and sheets._rows.size() == 4, "sem fichas: só as opções de criar (um modelo cada)")
+	for _i in 3:
+		await _key(KEY_DOWN, KEY_DOWN)
 	await _key(KEY_ENTER, KEY_ENTER)
 	_check(await _wait(func() -> bool: return sheets._character_id != ""), "Enter em Nova ficha de Ironsworn cria e abre a ficha")
 	var sheet_id: String = sheets._character_id
@@ -244,22 +261,69 @@ func _run() -> void:
 	await _key(KEY_ENTER, KEY_ENTER)
 	_check(await _wait(func() -> bool: return table._client.characters.is_empty() and ana.characters.is_empty()), "a ficha é excluída para todos")
 
-	# Regiões de foco: Tab leva ao campo, onde , ; . são caracteres e não atalhos.
-	table._history_zone.grab_focus()
+	# Cena: Tab leva da ficha à cena; cards por teclado, sincronizados com Ana (anfitriã).
+	var scene_panel: Control = table._scene
+	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == scene_panel._zone, "Tab leva da ficha à região de cena")
+	_check(scene_panel._rows.size() == 1 and scene_panel._rows[0]["kind"] == "new_card", "cena vazia: só Adicionar card")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(scene_panel._edit.visible, "Enter em Adicionar card pede o título")
+	scene_panel._edit.text = "Taverna"
+	scene_panel._edit.text_submitted.emit("Taverna")
+	_check(scene_panel._area.visible, "depois do título vem o texto, multilinha")
+	scene_panel._area.text = "Fumaça.\nCanecas."
+	scene_panel._area.submitted.emit("Fumaça.\nCanecas.")
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][0]["cards"] as Array).size() == 1), "o card chega em Ana")
+	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("adicionou o card Taverna")), "o histórico anuncia o card")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(scene_panel._edit.visible and scene_panel._edit.text == "Taverna", "Enter num card edita o título atual")
+	scene_panel._edit.cancelled.emit()
+	await _key(KEY_S, KEY_S)
+	_check(not scene_panel._scenes_view, "S não abre a lista de cenas para quem não é anfitrião")
+	ana.scene_op({"type": "scene:create", "id": "s2", "name": "Duelo"})
+	_check(await _wait(func() -> bool: return scene_panel._title() == "Cena: Duelo"), "Ana (anfitriã) cria outra cena e Caio vê a troca")
+	await _key(KEY_ENTER, KEY_ENTER)
+	scene_panel._edit.text = "Ponte"
+	scene_panel._edit.text_submitted.emit("Ponte")
+	scene_panel._area.submitted.emit("")
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][1]["cards"] as Array).size() == 1), "card na cena ativa nova")
+	await _key(KEY_DELETE, KEY_DELETE)
+	_check(scene_panel._mode == "choice", "Delete pede confirmação")
+	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][1]["cards"] as Array).is_empty()), "card removido para todos")
+	ana.scene_op({"type": "card:add", "id": "seg", "title": "Segredo", "text": "O bardo é espião."})
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][1]["cards"] as Array).size() == 1), "Ana adiciona um card")
+	ana.scene_op({"type": "card:visibility", "cardId": "seg", "hidden": true})
+	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).is_empty()), "card oculto some para Caio")
+	_check(not JSON.stringify(table._client.scene).contains("espião"), "o texto do card oculto nunca chega a Caio")
+	_check((ana.scene["scenes"][1]["cards"] as Array)[0]["hidden"], "Ana (anfitriã) continua vendo o card oculto")
+	ana.scene_op({"type": "card:visibility", "cardId": "seg", "hidden": false})
+	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).size() == 1), "revelar entrega o card a Caio")
+	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("revelou o card Segredo")), "o histórico anuncia a revelação")
+	await _key(KEY_V, KEY_V)
+	_check(scene_panel._rows[0]["kind"] == "card" and not (table._client.scene["scenes"][1]["cards"] as Array)[0]["hidden"], "V não oculta para quem não é anfitrião")
+	ana.scene_op({"type": "card:remove", "cardId": "seg"})
+	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).is_empty()), "card revelado removido")
+	_check(table._client.templates.size() == 4, "o servidor oferece 4 modelos de ficha")
+	ana.scene_op({"type": "scene:editors", "editors": "host"})
+	_check(await _wait(func() -> bool: return table._client.scene["editors"] == "host"), "Ana restringe a edição dos cards")
+	_check(await _wait(func() -> bool: return scene_panel._rows.is_empty()), "Caio deixa de ver Adicionar card")
+	sheets._zone.grab_focus()
+
+	# Campo de mensagem: só por ; ou mouse (Tab não chega nele). Lá dentro , ; . são caracteres.
 	var cursor_before: int = table.cursor
-	await _key(KEY_TAB, KEY_TAB)
-	await _key(KEY_TAB, KEY_TAB)
-	_check(table._composer.has_focus(), "Tab leva ao campo de mensagem")
+	_check(table._composer.focus_mode == Control.FOCUS_CLICK, "o campo de mensagem só aceita foco por clique")
+	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
+	_check(table._composer.has_focus(), "; abre o campo de mensagem")
 	await _key(KEY_COMMA, KEY_COMMA, 44)
 	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
 	await _key(KEY_PERIOD, KEY_PERIOD, 46)
 	_check(table._composer.text == ",;.", "vírgula, ponto e vírgula e ponto são digitados no campo")
 	_check(table.cursor == cursor_before, "o histórico não se mexe enquanto o campo tem o foco")
 	await _key(KEY_ESCAPE, KEY_ESCAPE)
-	_check(root.gui_get_focus_owner() == table._history_zone and table._composer.text == "", "Escape limpa o campo e devolve o foco ao histórico")
+	_check(root.gui_get_focus_owner() == sheets._zone and table._composer.text == "", "Escape limpa o campo e devolve o foco à ficha")
 	await _key(KEY_COMMA, KEY_COMMA, 44)
-	_check(table.cursor == cursor_before - 1, "de volta no histórico, vírgula navega de novo")
-	await _key(KEY_END, KEY_END)
 
 	# Tecla ";" do ABNT2 (posição física da barra) abre o campo de mensagem.
 	await _key(KEY_SLASH, KEY_SEMICOLON, 59)

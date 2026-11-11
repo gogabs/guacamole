@@ -12,6 +12,7 @@ const ThemeFactory := preload("res://scripts/ui/theme_factory.gd")
 const EditField := preload("res://scripts/ui/edit_field.gd")
 const FocusZone := preload("res://scripts/ui/focus_zone.gd")
 const SheetPanel := preload("res://scripts/ui/sheet_panel.gd")
+const ScenePanel := preload("res://scripts/ui/scene_panel.gd")
 
 const FUNCTION_KEYS := [KEY_F1, KEY_F2, KEY_F3, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F10]
 const SAFETY_KEYS := {KEY_F5: "stop", KEY_F6: "pause", KEY_F7: "rewind", KEY_F8: "forward"}
@@ -23,11 +24,11 @@ const KIND_COLORS := {
 	"local": "f4a261",
 }
 const HELP := (
-	"Atalhos. Ponto e vírgula: escrever uma mensagem. Vírgula e ponto: mensagem anterior e seguinte. "
-	+ "Home e End: primeira e última. Enter: reler a mensagem atual. "
+	"Atalhos. Ponto e vírgula: escrever uma mensagem. Vírgula e ponto: mensagem anterior e seguinte do histórico. "
+	+ "Control Home e Control End: primeira e última mensagem. Page Up e Page Down: dez para trás e para frente. "
 	+ "Comece a mensagem com barra para comandos: barra roll 2d6 mais 3, barra fate mais 3, "
 	+ "barra iron mais 2, barra progress 6, ou barra x para parar a cena. "
-	+ "Tab alterna entre histórico, fichas e o campo de mensagem; nas fichas, H lê a ajuda. F2: quem está na mesa. F3: soletrar e copiar o código. "
+	+ "Tab alterna entre fichas e cena; em cada uma, H lê a ajuda. F2: quem está na mesa. F3: soletrar e copiar o código. "
 	+ "F5 parar, F6 pausar, F7 retroceder, F8 avançar. F10: sair da mesa."
 )
 
@@ -44,6 +45,7 @@ var _log: RichTextLabel
 var _composer: LineEdit
 var _footer: Label
 var _sheets: Control
+var _scene: Control
 
 
 func setup(client: Node, you: Dictionary, room: Dictionary, players: Array, history: Array) -> void:
@@ -85,10 +87,10 @@ func _ready() -> void:
 	column.add_child(middle)
 
 	_history_zone = FocusZone.new()
-	_history_zone.setup("Histórico", "Vírgula e ponto navegam, Enter relê, ponto e vírgula escreve.")
+	_history_zone.focusable = false
+	_history_zone.setup("Histórico", "Vírgula e ponto navegam, ponto e vírgula escreve.")
 	_history_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_history_zone.size_flags_stretch_ratio = 1.4
-	_history_zone.key_pressed.connect(_on_history_key)
 	middle.add_child(_history_zone)
 
 	_sheets = SheetPanel.new()
@@ -96,16 +98,26 @@ func _ready() -> void:
 	_sheets.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	middle.add_child(_sheets)
 
+	var scene_panel := ScenePanel.new()
+	scene_panel.setup(_client)
+	scene_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	middle.add_child(scene_panel)
+	_scene = scene_panel
+
 	_log = RichTextLabel.new()
 	_log.bbcode_enabled = true
 	_log.scroll_following = false
 	_log.focus_mode = Control.FOCUS_NONE
+	# Sem barra de rolagem: o histórico rola sozinho até a mensagem atual.
+	_log.scroll_active = false
 	_log.mouse_filter = Control.MOUSE_FILTER_PASS
 	_history_zone.add_child(_log)
 
 	_composer = EditField.new()
 	_composer.placeholder_text = "Pressione ; para escrever"
 	_composer.max_length = 2000
+	# Fora do Tab: só se chega nele por ; ou pelo mouse.
+	_composer.focus_mode = Control.FOCUS_CLICK
 	_composer.setup("Mensagem", "Enter envia, Escape cancela.")
 	_composer.text_submitted.connect(_on_submit)
 	_composer.cancelled.connect(_on_cancel)
@@ -124,7 +136,7 @@ func _ready() -> void:
 	_refresh_header()
 	_render()
 	Sfx.play("connect")
-	_history_zone.grab_focus.call_deferred()
+	_sheets.focus_zone().grab_focus.call_deferred()
 	Speech.say(
 		"Mesa %s. Código %s. %s Pressione F1 para ouvir os atalhos."
 		% [_room.get("name", ""), A11y.spell(str(_room.get("id", ""))), _players_summary()],
@@ -132,22 +144,24 @@ func _ready() -> void:
 	)
 
 
-## Teclas de função valem em qualquer região (o campo de texto não as consome).
+## Teclas de função e teclas do histórico valem em qualquer lugar fora de um campo de texto.
+## A região com foco (ficha) trata as suas teclas antes; só o que sobra chega aqui.
 func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
-	if key == null or not key.pressed or not FUNCTION_KEYS.has(key.keycode):
+	if key == null or not key.pressed:
 		return
-	if not key.echo:
-		_handle_function_key(key.keycode)
-	get_viewport().set_input_as_handled()
-
-
-## Teclas do histórico: só chegam aqui quando a região do histórico tem o foco.
-func _on_history_key(key: InputEventKey) -> void:
-	if key.ctrl_pressed or key.alt_pressed or key.meta_pressed:
+	if FUNCTION_KEYS.has(key.keycode):
+		if not key.echo:
+			_handle_function_key(key.keycode)
+		get_viewport().set_input_as_handled()
+		return
+	var focus := get_viewport().gui_get_focus_owner()
+	if focus is LineEdit or focus is TextEdit:
+		return
+	if key.alt_pressed or key.meta_pressed:
 		return
 	if _handle_history_key(key):
-		_history_zone.accept_event()
+		get_viewport().set_input_as_handled()
 
 
 func _handle_function_key(code: Key) -> void:
@@ -182,16 +196,17 @@ func _handle_history_key(key: InputEventKey) -> bool:
 			return true
 	match key.keycode:
 		KEY_HOME:
+			if not key.ctrl_pressed:
+				return false
 			_go_to(0)
 		KEY_END:
+			if not key.ctrl_pressed:
+				return false
 			_go_to(entries.size() - 1)
 		KEY_PAGEUP:
 			_move(-10)
 		KEY_PAGEDOWN:
 			_move(10)
-		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
-			if cursor >= 0:
-				Speech.say(_spoken(entries[cursor]), true)
 		_:
 			return false
 	return true
@@ -340,7 +355,7 @@ func _open_input(prefill: String) -> void:
 
 func _close_input() -> void:
 	_composer.text = ""
-	_history_zone.grab_focus()
+	_sheets.focus_zone().grab_focus()
 
 
 func _on_submit(text: String) -> void:

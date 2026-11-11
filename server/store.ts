@@ -1,4 +1,5 @@
 import type { RoomAccess } from "../core/protocol.ts";
+import { normalizeSceneState } from "../core/scene.ts";
 import { normalizedPlayerName, normalizedRoomName, type RoomRecord } from "./room.ts";
 
 const ROOM_ID = /^[A-Z0-9]{6}$/;
@@ -44,6 +45,7 @@ function normalizeRoom(value: unknown): RoomRecord | null {
     history: history as RoomRecord["history"],
     nextSeq: typeof raw.nextSeq === "number" ? raw.nextSeq : history.length + 1,
     characters: Array.isArray(raw.characters) ? raw.characters as RoomRecord["characters"] : [],
+    scene: normalizeSceneState(raw.scene),
     lastRolls: {},
   };
 }

@@ -1,5 +1,6 @@
 import type { Roll } from "./dice.ts";
 import { SAFETY_ACTIONS, type SafetyAction } from "./safety.ts";
+import { SCENE_OP_TYPES, type SceneOp, type SceneState } from "./scene.ts";
 import type { SheetOp } from "./sheet/ops.ts";
 import type { CharacterSheet, SheetTemplate } from "./sheet/types.ts";
 
@@ -69,7 +70,8 @@ export type ClientMessage =
     private?: boolean;
   }
   /** Queima o momentum sobre a última rolagem de Ironsworn desta ficha. */
-  | { type: "sheet:burn"; characterId: string };
+  | { type: "sheet:burn"; characterId: string }
+  | { type: "scene:op"; op: SceneOp };
 
 export type ServerMessage =
   | {
@@ -80,10 +82,12 @@ export type ServerMessage =
     history: ChatEntry[];
     templates: SheetTemplate[];
     characters: RoomCharacter[];
+    scene: SceneState;
   }
   | { type: "chat:entry"; entry: ChatEntry }
   | { type: "sheet:sync"; character: RoomCharacter }
   | { type: "sheet:removed"; characterId: string }
+  | { type: "scene:sync"; scene: SceneState }
   | { type: "presence:sync"; players: Player[] }
   | { type: "room:sync"; room: RoomSummary }
   | { type: "error"; message: string };
@@ -118,6 +122,13 @@ export function parseClientMessage(data: string): ClientMessage {
     const value = message[key];
     return typeof value === "string" && value.length <= 200 ? value : null;
   };
+  if (message.type === "scene:op") {
+    const op = message.op as Record<string, unknown> | undefined;
+    if (typeof op === "object" && op !== null && SCENE_OP_TYPES.includes(String(op.type))) {
+      return { type: "scene:op", op: op as unknown as SceneOp };
+    }
+    throw new ProtocolError("Operação de cena inválida.");
+  }
   const characterId = str("characterId");
   switch (message.type) {
     case "sheet:create": {

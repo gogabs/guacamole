@@ -182,3 +182,21 @@ Deno.test("ficha: rolagem privada não entra no histórico e medidores rolam", (
   assertEquals([out.privateEntry.private, out.privateEntry.author], [true, "Kaja"]);
   assertEquals(room.history.length, 0);
 });
+Deno.test("cena: anfitrião cria cenas, todos editam cards e o histórico anuncia", () => {
+  const room = createRoomRecord("ABC234", "Mesa", "Mestre", "open");
+  const denied = handleClientMessage(room, ana, { type: "scene:op", op: { type: "scene:create", id: "s2", name: "Duelo" } });
+  assertEquals("error" in denied, true);
+
+  const created = handleClientMessage(room, host, { type: "scene:op", op: { type: "scene:create", id: "s2", name: "Duelo" } });
+  if (!("scene" in created) || !created.scene) throw new Error("esperava cena");
+  assertEquals(created.entry!.text, "Mestre criou a cena Duelo.");
+  assertEquals(room.scene.activeId, "s2");
+
+  const card = handleClientMessage(room, ana, { type: "scene:op", op: { type: "card:add", id: "c1", title: "Ponte", text: "Estreita." } });
+  assertEquals("error" in card, false);
+  assertEquals(room.scene.scenes[1].cards.length, 1);
+
+  handleClientMessage(room, host, { type: "scene:op", op: { type: "scene:editors", editors: "host" } });
+  const blocked = handleClientMessage(room, ana, { type: "scene:op", op: { type: "card:remove", cardId: "c1" } });
+  assertEquals("error" in blocked, true);
+});

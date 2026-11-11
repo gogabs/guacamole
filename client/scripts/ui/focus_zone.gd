@@ -7,6 +7,9 @@ extends PanelContainer
 
 signal key_pressed(key: InputEventKey)
 
+## Falso: a região só enquadra o conteúdo e nunca recebe foco (ex.: o histórico).
+var focusable := true
+
 var _normal: StyleBoxFlat
 var _focused: StyleBoxFlat
 
@@ -17,7 +20,7 @@ func setup(a11y_name: String, a11y_description: String = "") -> void:
 
 
 func _ready() -> void:
-	focus_mode = Control.FOCUS_ALL
+	focus_mode = Control.FOCUS_ALL if focusable else Control.FOCUS_NONE
 	_normal = _box(Color("5b6270"), 2)
 	_focused = _box(Color("ffd166"), 4)
 	add_theme_stylebox_override("panel", _normal)
@@ -33,6 +36,9 @@ func _on_gui_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
 	if key != null and key.pressed:
 		key_pressed.emit(key)
+		# Setas nunca movem o foco entre regiões: isso é papel do Tab.
+		if [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT].has(key.keycode):
+			accept_event()
 
 
 func _box(border_color: Color, border: int) -> StyleBoxFlat:

@@ -11,6 +11,7 @@ import type {
 } from "../core/protocol.ts";
 import { defaultRng, type Rng } from "../core/rng.ts";
 import { safetyLabel } from "../core/safety.ts";
+import { applySceneOp, createSceneState, SceneError, type SceneState } from "../core/scene.ts";
 import { createCharacter, SheetError } from "../core/sheet/fields.ts";
 import { applySheetOp, burnMomentum, rollFromField } from "../core/sheet/ops.ts";
 import { BUILT_IN_TEMPLATES } from "../core/sheet/templates/mod.ts";
@@ -29,6 +30,7 @@ export interface RoomRecord {
   history: ChatEntry[];
   nextSeq: number;
   characters: RoomCharacter[];
+  scene: SceneState;
   /** Última rolagem de Ironsworn por ficha, para queimar momentum. Só em memória útil. */
   lastRolls: Record<string, { roll: IronswornRoll; private: boolean }>;
 }
@@ -50,6 +52,7 @@ export function createRoomRecord(
     history: [],
     nextSeq: 1,
     characters: [],
+    scene: createSceneState(),
     lastRolls: {},
   };
 }
@@ -94,7 +97,13 @@ export function systemEntry(room: RoomRecord, text: string): ChatEntry {
 
 export type MessageOutcome =
   | { error: string }
-  | { entry?: ChatEntry; privateEntry?: ChatEntry; character?: RoomCharacter; removed?: string };
+  | {
+    entry?: ChatEntry;
+    privateEntry?: ChatEntry;
+    character?: RoomCharacter;
+    removed?: string;
+    scene?: SceneState;
+  };
 
 const MAX_CHARACTERS = 50;
 
@@ -184,6 +193,17 @@ export function handleClientMessage(
   message: ClientMessage,
   rng: Rng = defaultRng,
 ): MessageOutcome {
+  if (message.type === "scene:op") {
+    try {
+      const result = applySceneOp(room.scene, message.op, player.role === "host");
+      room.scene = result.state;
+      const text = result.message(player.name);
+      return { scene: room.scene, entry: text ? systemEntry(room, text) : undefined };
+    } catch (error) {
+      if (error instanceof SceneError) return { error: error.message };
+      throw error;
+    }
+  }
   if (message.type.startsWith("sheet:")) {
     return handleSheetMessage(
       room,

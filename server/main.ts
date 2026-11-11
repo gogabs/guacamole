@@ -8,6 +8,7 @@ import {
   type ServerMessage,
 } from "../core/protocol.ts";
 import { defaultRng, type Rng } from "../core/rng.ts";
+import { sceneFor } from "../core/scene.ts";
 import { BUILT_IN_TEMPLATES } from "../core/sheet/templates/mod.ts";
 import {
   canEnter,
@@ -71,6 +72,13 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
   const broadcast = (roomId: string, message: ServerMessage) => {
     for (const socket of connections.get(roomId)?.keys() ?? []) send(socket, message);
+  };
+
+  /** Cada jogador recebe a cena sem os cards ocultos; só o anfitrião vê tudo. */
+  const broadcastScene = (room: RoomRecord) => {
+    for (const [socket, player] of connections.get(room.id) ?? []) {
+      send(socket, { type: "scene:sync", scene: sceneFor(room.scene, player.role === "host") });
+    }
   };
 
   const broadcastEntry = (room: RoomRecord, entry: ChatEntry) => {
@@ -149,6 +157,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         history: room.history.slice(-WELCOME_HISTORY),
         templates: [...BUILT_IN_TEMPLATES],
         characters: room.characters,
+        scene: sceneFor(room.scene, player.role === "host"),
       });
       broadcast(room.id, { type: "presence:sync", players: playersOf(room.id) });
       broadcastEntry(room, systemEntry(room, `${player.name} entrou na mesa.`));
@@ -170,6 +179,10 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       }
       if (outcome.character) {
         broadcast(room.id, { type: "sheet:sync", character: outcome.character });
+        scheduleSave();
+      }
+      if (outcome.scene) {
+        broadcastScene(room);
         scheduleSave();
       }
       if (outcome.removed) {
