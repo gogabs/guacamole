@@ -8,6 +8,7 @@ import {
   type ServerMessage,
 } from "../core/protocol.ts";
 import { defaultRng, type Rng } from "../core/rng.ts";
+import { BUILT_IN_TEMPLATES } from "../core/sheet/templates/mod.ts";
 import {
   canEnter,
   createRoomRecord,
@@ -146,6 +147,8 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         room: summaryOf(room),
         players: playersOf(room.id),
         history: room.history.slice(-WELCOME_HISTORY),
+        templates: [...BUILT_IN_TEMPLATES],
+        characters: room.characters,
       });
       broadcast(room.id, { type: "presence:sync", players: playersOf(room.id) });
       broadcastEntry(room, systemEntry(room, `${player.name} entrou na mesa.`));
@@ -161,8 +164,19 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         return;
       }
       const outcome = handleClientMessage(room, player, message, rng);
-      if ("error" in outcome) send(socket, { type: "error", message: outcome.error });
-      else broadcastEntry(room, outcome.entry);
+      if ("error" in outcome) {
+        send(socket, { type: "error", message: outcome.error });
+        return;
+      }
+      if (outcome.character) {
+        broadcast(room.id, { type: "sheet:sync", character: outcome.character });
+        scheduleSave();
+      }
+      if (outcome.removed) {
+        broadcast(room.id, { type: "sheet:removed", characterId: outcome.removed });
+        scheduleSave();
+      }
+      if (outcome.entry) broadcastEntry(room, outcome.entry);
     };
 
     let closed = false;

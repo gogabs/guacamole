@@ -11,3 +11,4 @@ data/*.tmp
 *.log
 .godot/
 *.import
+client/addons/prismatoid/bin/

@@ -1,0 +1,27 @@
+[configuration]
+
+entry_symbol = "prism_library_init"
+compatibility_minimum = "4.5"
+
+[libraries]
+
+linux.debug.x86_64 = "res://addons/prismatoid/bin/linux/prismatoid.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/prismatoid/bin/linux/prismatoid.linux.template_release.x86_64.so"
+linux.debug.arm64 = "res://addons/prismatoid/bin/linux/prismatoid.linux.template_debug.arm64.so"
+linux.release.arm64 = "res://addons/prismatoid/bin/linux/prismatoid.linux.template_release.arm64.so"
+windows.debug.x86_64 = "res://addons/prismatoid/bin/windows/prismatoid.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/prismatoid/bin/windows/prismatoid.windows.template_release.x86_64.dll"
+windows.debug.arm64 = "res://addons/prismatoid/bin/windows/prismatoid.windows.template_debug.arm64.dll"
+windows.release.arm64 = "res://addons/prismatoid/bin/windows/prismatoid.windows.template_release.arm64.dll"
+macos.debug.arm64 = "res://addons/prismatoid/bin/macos/prismatoid.macos.template_debug.arm64.dylib"
+macos.release.arm64 = "res://addons/prismatoid/bin/macos/prismatoid.macos.template_release.arm64.dylib"
+macos.debug.x86_64 = "res://addons/prismatoid/bin/macos/prismatoid.macos.template_debug.x86_64.dylib"
+macos.release.x86_64 = "res://addons/prismatoid/bin/macos/prismatoid.macos.template_release.x86_64.dylib"
+android.debug.arm64 = "res://addons/prismatoid/bin/android/prismatoid.android.template_debug.arm64.so"
+android.release.arm64 = "res://addons/prismatoid/bin/android/prismatoid.android.template_release.arm64.so"
+android.debug.x86_64 = "res://addons/prismatoid/bin/android/prismatoid.android.template_debug.x86_64.so"
+android.release.x86_64 = "res://addons/prismatoid/bin/android/prismatoid.android.template_release.x86_64.so"
+ios.debug.arm64 = "res://addons/prismatoid/bin/ios/prismatoid.ios.template_debug.arm64.dylib"
+ios.release.arm64 = "res://addons/prismatoid/bin/ios/prismatoid.ios.template_release.arm64.dylib"
+web.debug.wasm32 = "res://addons/prismatoid/bin/web/prismatoid.web.template_debug.wasm32.so"
+web.release.wasm32 = "res://addons/prismatoid/bin/web/prismatoid.web.template_release.wasm32.so"

@@ -6,6 +6,8 @@ signal welcomed(you: Dictionary, room: Dictionary, players: Array, history: Arra
 signal entry_received(entry: Dictionary)
 signal presence_changed(players: Array)
 signal room_changed(room: Dictionary)
+signal sheet_changed(character: Dictionary)
+signal sheet_removed(character_id: String)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -14,6 +16,9 @@ var ws_base := ""
 var you: Dictionary = {}
 var room: Dictionary = {}
 var players: Array = []
+var templates: Array = []
+## Fichas da mesa por id.
+var characters: Dictionary = {}
 
 var _ws := WebSocketPeer.new()
 var _active := false
@@ -79,6 +84,36 @@ func send_safety(action: String) -> void:
 	_send({"type": "safety:signal", "action": action})
 
 
+func template_for(template_id: String) -> Dictionary:
+	for template in templates:
+		if template["id"] == template_id:
+			return template
+	return {}
+
+
+func create_sheet(template_id: String, sheet_name: String) -> void:
+	_send({"type": "sheet:create", "templateId": template_id, "name": sheet_name})
+
+
+func delete_sheet(character_id: String) -> void:
+	_send({"type": "sheet:delete", "characterId": character_id})
+
+
+func sheet_op(character_id: String, op: Dictionary) -> void:
+	_send({"type": "sheet:op", "characterId": character_id, "op": op})
+
+
+func roll_field(character_id: String, field_id: String, track_id: String = "") -> void:
+	var message := {"type": "sheet:roll", "characterId": character_id, "fieldId": field_id}
+	if not track_id.is_empty():
+		message["trackId"] = track_id
+	_send(message)
+
+
+func burn_momentum(character_id: String) -> void:
+	_send({"type": "sheet:burn", "characterId": character_id})
+
+
 func leave() -> void:
 	if _active:
 		_ws.close()
@@ -87,6 +122,8 @@ func leave() -> void:
 	you = {}
 	room = {}
 	players = []
+	templates = []
+	characters = {}
 
 
 func _send(message: Dictionary) -> void:
@@ -120,12 +157,23 @@ func _handle(raw: String) -> void:
 			you = message["you"]
 			room = message["room"]
 			players = message["players"]
+			templates = message.get("templates", [])
+			characters = {}
+			for character in message.get("characters", []):
+				characters[character["id"]] = character
 			welcomed.emit(you, room, players, message["history"])
 		"chat:entry":
 			entry_received.emit(message["entry"])
 		"presence:sync":
 			players = message["players"]
 			presence_changed.emit(players)
+		"sheet:sync":
+			var character: Dictionary = message["character"]
+			characters[character["id"]] = character
+			sheet_changed.emit(character)
+		"sheet:removed":
+			characters.erase(message["characterId"])
+			sheet_removed.emit(str(message["characterId"]))
 		"room:sync":
 			room = message["room"]
 			room_changed.emit(room)
@@ -153,3 +201,4 @@ func _request(method: int, path: String, body: Dictionary) -> Dictionary:
 		"data": data,
 		"message": str(data.get("message", "Erro %d do servidor." % code)),
 	}
+

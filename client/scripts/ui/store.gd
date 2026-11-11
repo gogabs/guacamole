@@ -1,12 +1,13 @@
 extends RefCounted
-## Preferências locais: último servidor/nome/mesa e os tokens de anfitrião de cada mesa.
+## Preferências locais: último servidor e nome, e o token de anfitrião de cada mesa.
 
-const PATH := "user://settings.cfg"
+## Testes apontam para outro arquivo para não mexer nas preferências reais.
+static var path := "user://settings.cfg"
 
 
 static func _load() -> ConfigFile:
 	var config := ConfigFile.new()
-	config.load(PATH)
+	config.load(path)
 	return config
 
 
@@ -17,7 +18,7 @@ static func get_value(key: String, fallback: String = "") -> String:
 static func set_value(key: String, value: String) -> void:
 	var config := _load()
 	config.set_value("last", key, value)
-	config.save(PATH)
+	config.save(path)
 
 
 static func token_for(room_id: String) -> String:
@@ -27,4 +28,4 @@ static func token_for(room_id: String) -> String:
 static func save_token(room_id: String, token: String) -> void:
 	var config := _load()
 	config.set_value("tokens", room_id.to_upper(), token)
-	config.save(PATH)
+	config.save(path)

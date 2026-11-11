@@ -12,6 +12,11 @@ config/features=PackedStringArray("4.7")
 Sfx="*res://scripts/autoload/sfx.gd"
 Speech="*res://scripts/autoload/speech.gd"
 
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+
 [display]
 
 window/size/viewport_width=1280

@@ -60,8 +60,6 @@ func _on_submitted(server: String, player_name: String, code: String) -> void:
 			return
 
 	Store.set_value("server", server)
-	Store.set_value("name", player_name)
-	Store.set_value("code", code)
 	client.connect_to_room(code, player_name, token)
 
 

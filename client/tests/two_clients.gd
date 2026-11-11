@@ -3,6 +3,7 @@ extends SceneTree
 ## Uso: godot --headless --path client --script res://tests/two_clients.gd -- 127.0.0.1:8000
 
 const Client := preload("res://scripts/net/client.gd")
+const Store := preload("res://scripts/ui/store.gd")
 
 var failures := 0
 
@@ -39,9 +40,18 @@ func _key(physical: Key, keycode: Key, unicode: int = 0) -> void:
 	await process_frame
 
 
+func _goto_row(sheets: Control, matches: Callable) -> void:
+	await _key(KEY_HOME, KEY_HOME)
+	for i in 120:
+		if sheets._rows[sheets._cursor].is_empty() or matches.call(sheets._rows[sheets._cursor]):
+			return
+		await _key(KEY_DOWN, KEY_DOWN)
+
+
 func _run() -> void:
 	# Em _initialize a árvore ainda não está ativa (HTTPRequest recusa pedidos).
 	await process_frame
+	Store.path = "user://test_settings.cfg"
 	var args := OS.get_cmdline_user_args()
 	var server: String = args[0] if args.size() > 0 else "127.0.0.1:8000"
 
@@ -65,11 +75,33 @@ func _run() -> void:
 	root.add_child(app)
 	await process_frame
 	var connect_screen: Control = app._screen
-	_check(connect_screen != null and connect_screen.has_signal("submitted"), "tela de conexão aparece")
-	connect_screen._server.text = server
-	connect_screen._name.text = "Caio"
-	connect_screen._code.text = room_id
-	connect_screen._submit()
+	var menu: Control = connect_screen._menu
+	_check(menu.current_id() == "name", "menu abre no item Nome")
+	await _key(KEY_DOWN, KEY_DOWN)
+	_check(menu.current_id() == "create", "seta para baixo vai para Criar mesa")
+	await _key(KEY_UP, KEY_UP)
+	_check(menu.current_id() == "name", "seta para cima volta para Nome")
+
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(connect_screen._edit_box.visible and connect_screen._edit_field.has_focus(), "Enter no Nome abre o campo de edição")
+	connect_screen._edit_field.text = "descartado"
+	connect_screen._edit_field.cancelled.emit()
+	_check(not connect_screen._edit_box.visible and menu.get_value("name") != "descartado", "Escape fecha o campo sem alterar o nome")
+
+	await _key(KEY_ENTER, KEY_ENTER)
+	connect_screen._edit_field.text = "Caio"
+	connect_screen._edit_field.text_submitted.emit("Caio")
+	_check(not connect_screen._edit_box.visible, "campo some ao confirmar")
+	_check(menu.get_value("name") == "Caio", "nome atualizado no menu")
+
+	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_DOWN, KEY_DOWN)
+	_check(menu.current_id() == "join", "dois passos abaixo está Entrar em uma mesa")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(connect_screen._edit_box.visible and connect_screen._edit_field.text == "", "Entrar abre o campo de código vazio")
+	connect_screen._server_value = server
+	connect_screen._edit_field.text = room_id
+	connect_screen._edit_field.text_submitted.emit(room_id)
 	_check(
 		await _wait(func() -> bool: return app._screen != null and app._screen.has_method("_move")),
 		"Caio chega na tela da mesa"
@@ -122,6 +154,79 @@ func _run() -> void:
 	await _key(KEY_END, KEY_END)
 	_check(table.cursor == last, "End vai à última entrada")
 
+	# Fichas: Tab do histórico leva à região de fichas, tudo por teclado.
+	_check(root.gui_get_focus_owner() == table._history_zone, "a mesa abre com o foco no histórico")
+	var sheets: Control = table._sheets
+	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == sheets._zone, "Tab leva à região de fichas")
+	_check(sheets._character_id == "" and sheets._rows.size() == 2, "sem fichas: só as opções de criar (Fate e Ironsworn)")
+	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return sheets._character_id != ""), "Enter em Nova ficha de Ironsworn cria e abre a ficha")
+	var sheet_id: String = sheets._character_id
+	_check(await _wait(func() -> bool: return ana.characters.has(sheet_id)), "Ana também recebe a ficha")
+
+	await _goto_row(sheets, func(row: Dictionary) -> bool: return row["kind"] == "field" and row["field"]["id"] == "iron.stat.iron")
+	await _key(KEY_RIGHT, KEY_RIGHT)
+	_check(await _wait(func() -> bool: return int(table._client.characters[sheet_id]["values"]["iron.stat.iron"]) == 1), "seta direita soma 1 ao atributo")
+	_check(await _wait(func() -> bool: return int(ana.characters[sheet_id]["values"]["iron.stat.iron"]) == 1), "a mudança chega em Ana")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(sheets._edit.visible and sheets._edit.has_focus(), "Enter no atributo abre o campo de edição")
+	sheets._edit.text = "3"
+	sheets._edit.text_submitted.emit("3")
+	_check(await _wait(func() -> bool: return int(table._client.characters[sheet_id]["values"]["iron.stat.iron"]) == 3), "valor digitado é aplicado")
+	_check(root.gui_get_focus_owner() == sheets._zone and not sheets._edit.visible, "o campo some e o foco volta à ficha")
+	var rolls_before: int = ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size()
+	await _key(KEY_R, KEY_R)
+	_check(
+		await _wait(func() -> bool: return ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size() == rolls_before + 1),
+		"R rola o atributo e o resultado chega em Ana"
+	)
+	_check(str(ana_entries.back()["text"]).begins_with("Caio: "), "a rolagem traz o nome da ficha")
+
+	await _goto_row(sheets, func(row: Dictionary) -> bool: return row["kind"] == "track_add" and row["field"]["id"] == "iron.vows")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(sheets._edit.visible, "Enter em Nova trilha pede o nome")
+	sheets._edit.text = "Vingar o irmão"
+	sheets._edit.text_submitted.emit("Vingar o irmão")
+	_check(sheets._mode == "choice", "depois do nome vem a escolha da graduação")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return (table._client.characters[sheet_id]["values"]["iron.vows"] as Array).size() == 1), "a trilha é criada")
+	await _key(KEY_M, KEY_M)
+	_check(await _wait(func() -> bool: return int(table._client.characters[sheet_id]["values"]["iron.vows"][0]["ticks"]) == 4), "M marca progresso (formidável = 4 marcas)")
+	rolls_before = ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size()
+	await _key(KEY_R, KEY_R)
+	_check(
+		await _wait(func() -> bool: return ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size() == rolls_before + 1),
+		"R na trilha faz uma rolagem de progresso"
+	)
+
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	_check(sheets._character_id == "", "Escape volta à lista de fichas")
+	await _key(KEY_HOME, KEY_HOME)
+	await _key(KEY_DELETE, KEY_DELETE)
+	_check(sheets._mode == "choice", "Delete pede confirmação")
+	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return table._client.characters.is_empty() and ana.characters.is_empty()), "a ficha é excluída para todos")
+
+	# Regiões de foco: Tab leva ao campo, onde , ; . são caracteres e não atalhos.
+	table._history_zone.grab_focus()
+	var cursor_before: int = table.cursor
+	await _key(KEY_TAB, KEY_TAB)
+	await _key(KEY_TAB, KEY_TAB)
+	_check(table._composer.has_focus(), "Tab leva ao campo de mensagem")
+	await _key(KEY_COMMA, KEY_COMMA, 44)
+	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
+	await _key(KEY_PERIOD, KEY_PERIOD, 46)
+	_check(table._composer.text == ",;.", "vírgula, ponto e vírgula e ponto são digitados no campo")
+	_check(table.cursor == cursor_before, "o histórico não se mexe enquanto o campo tem o foco")
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	_check(root.gui_get_focus_owner() == table._history_zone and table._composer.text == "", "Escape limpa o campo e devolve o foco ao histórico")
+	await _key(KEY_COMMA, KEY_COMMA, 44)
+	_check(table.cursor == cursor_before - 1, "de volta no histórico, vírgula navega de novo")
+	await _key(KEY_END, KEY_END)
+
 	# Tecla ";" do ABNT2 (posição física da barra) abre o campo de mensagem.
 	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
 	_check(table._composer.has_focus(), "; (posição da barra) abre o campo de mensagem")
@@ -133,6 +238,7 @@ func _run() -> void:
 
 	app.queue_free()
 	ana.leave()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(Store.path))
 	print("---")
 	print("Falhas: ", failures)
 	quit(1 if failures > 0 else 0)

@@ -43,5 +43,7 @@ function normalizeRoom(value: unknown): RoomRecord | null {
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     history: history as RoomRecord["history"],
     nextSeq: typeof raw.nextSeq === "number" ? raw.nextSeq : history.length + 1,
+    characters: Array.isArray(raw.characters) ? raw.characters as RoomRecord["characters"] : [],
+    lastRolls: {},
   };
 }
