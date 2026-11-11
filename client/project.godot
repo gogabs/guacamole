@@ -1,0 +1,19 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Guacamole"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+
+[autoload]
+
+Sfx="*res://scripts/autoload/sfx.gd"
+Speech="*res://scripts/autoload/speech.gd"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
