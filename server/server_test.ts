@@ -113,10 +113,10 @@ Deno.test("dois clientes: chat, rolagem, segurança e erro privado", async () =>
     // Segurança: por comando e por sinal.
     bia.send({ type: "chat:send", input: "/x" });
     const stop = await ana.next("chat:entry", (m) => m.entry.kind === "safety");
-    assertEquals([stop.entry.author, stop.entry.action], ["Bia", "stop"]);
+    assertEquals([stop.entry.author, stop.entry.action], ["", "stop"]);
     ana.send({ type: "safety:signal", action: "pause" });
     const pause = await bia.next("chat:entry", (m) => m.entry.action === "pause");
-    assertEquals(pause.entry.author, "Ana");
+    assertEquals(pause.entry.author, "");
 
     // Erro é privado: só quem errou recebe.
     bia.send({ type: "chat:send", input: "/roll banana" });

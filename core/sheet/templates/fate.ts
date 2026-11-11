@@ -97,6 +97,7 @@ export const FATE_TEMPLATE: SheetTemplate = {
           label: "Estresse físico",
           description: "Duas caixas básicas. Vigor +1 ou +2 libera a terceira; Vigor +3 ou mais, a quarta.",
           count: 4,
+          labels: ["1", "2", "3", "4"],
         },
         {
           id: "fate.stress.mental",
@@ -104,6 +105,7 @@ export const FATE_TEMPLATE: SheetTemplate = {
           label: "Estresse mental",
           description: "Duas caixas básicas. Vontade +1 ou +2 libera a terceira; Vontade +3 ou mais, a quarta.",
           count: 4,
+          labels: ["1", "2", "3", "4"],
         },
       ],
     },

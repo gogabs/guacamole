@@ -84,11 +84,11 @@ Deno.test("describeRoll: texto legível por leitor de tela", () => {
   const iron = rollIronsworn(2, seq(face(5, 6), face(4, 10), face(9, 10)), "Ferro");
   assertEquals(
     describeRoll(iron),
-    "Ironsworn Ferro. Dado de ação 5 +2 = 7, contra 4 e 9. Acerto parcial.",
+    "Acerto parcial, 7 contra 4 e 9 · Ferro, d6+2 contra 2d10, dado de ação 5",
   );
   const fate = rollFate(3, seq(fateFace(1), fateFace(-1), fateFace(0), fateFace(1)));
   assertEquals(
     describeRoll(fate),
-    "Fate. Dados: mais, menos, vazio, mais, soma +1. Modificador +3. Resultado +4, Ótimo.",
+    "+4, Ótimo · 4dF+3, mais menos vazio mais",
   );
 });

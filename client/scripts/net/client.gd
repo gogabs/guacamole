@@ -103,8 +103,8 @@ func sheet_op(character_id: String, op: Dictionary) -> void:
 	_send({"type": "sheet:op", "characterId": character_id, "op": op})
 
 
-func roll_field(character_id: String, field_id: String, track_id: String = "") -> void:
-	var message := {"type": "sheet:roll", "characterId": character_id, "fieldId": field_id}
+func roll_field(character_id: String, field_id: String, track_id: String = "", private_roll: bool = false) -> void:
+	var message := {"type": "sheet:roll", "characterId": character_id, "fieldId": field_id, "private": private_roll}
 	if not track_id.is_empty():
 		message["trackId"] = track_id
 	_send(message)

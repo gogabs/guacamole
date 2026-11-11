@@ -40,6 +40,28 @@ func _key(physical: Key, keycode: Key, unicode: int = 0) -> void:
 	await process_frame
 
 
+func _shift_key(code: Key) -> void:
+	var event := InputEventKey.new()
+	event.pressed = true
+	event.physical_keycode = code
+	event.keycode = code
+	event.shift_pressed = true
+	Input.parse_input_event(event)
+	await process_frame
+	await process_frame
+
+
+func _ctrl_key(code: Key) -> void:
+	var event := InputEventKey.new()
+	event.pressed = true
+	event.physical_keycode = code
+	event.keycode = code
+	event.ctrl_pressed = true
+	Input.parse_input_event(event)
+	await process_frame
+	await process_frame
+
+
 func _goto_row(sheets: Control, matches: Callable) -> void:
 	await _key(KEY_HOME, KEY_HOME)
 	for i in 120:
@@ -182,8 +204,20 @@ func _run() -> void:
 		await _wait(func() -> bool: return ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size() == rolls_before + 1),
 		"R rola o atributo e o resultado chega em Ana"
 	)
-	_check(str(ana_entries.back()["text"]).begins_with("Caio: "), "a rolagem traz o nome da ficha")
+	_check(ana_entries.back()["author"] == "Caio" and str(ana_entries.back()["text"]).contains(" · "), "a rolagem sai em nome da ficha, no formato resultado · detalhe")
 
+	# Saúde também rola; Shift+R é privado (só Caio recebe).
+	await _goto_row(sheets, func(row: Dictionary) -> bool: return row["kind"] == "field" and row["field"]["id"] == "iron.meter.health")
+	var caio_rolls: int = table.entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size()
+	var ana_rolls: int = ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size()
+	await _shift_key(KEY_R)
+	_check(await _wait(func() -> bool: return table.entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size() == caio_rolls + 1), "Shift+R em Saúde rola")
+	_check(table.entries.back().get("private", false), "a rolagem privada chega marcada a Caio")
+	await _key(KEY_R, KEY_R)
+	_check(await _wait(func() -> bool: return ana_entries.filter(func(e: Dictionary) -> bool: return e["kind"] == "roll").size() == ana_rolls + 1), "só a rolagem pública chega em Ana")
+	var before_jump: int = sheets._cursor
+	await _ctrl_key(KEY_UP)
+	_check(sheets._rows[sheets._cursor]["kind"] == "section" and sheets._cursor < before_jump, "Ctrl+Cima pula para o início da seção")
 	await _goto_row(sheets, func(row: Dictionary) -> bool: return row["kind"] == "track_add" and row["field"]["id"] == "iron.vows")
 	await _key(KEY_ENTER, KEY_ENTER)
 	_check(sheets._edit.visible, "Enter em Nova trilha pede o nome")

@@ -2,14 +2,16 @@ extends VBoxContainer
 ## Região "Ficha": fichas da mesa e a ficha aberta, tudo por teclado.
 ##
 ## Lista de fichas:  Setas navegam, Enter abre ou cria, Delete exclui.
-## Ficha aberta:     Setas navegam; Esquerda/Direita ajustam; Enter age; R rola; M marca progresso
-##                   (Shift+M desmarca); B queima momentum; Delete remove; Escape volta à lista.
+## Ficha aberta:     Setas navegam, Ctrl+Cima/Baixo pulam de seção; Esquerda/Direita ajustam; Enter age;
+##                   R rola (Shift+R em privado); M marca progresso, N desmarca; B queima momentum;
+##                   Delete remove; Escape volta à lista.
 ##
 ## É um componente próprio, então quem fala é o app (Prism). O campo de edição que aparece
 ## sob a região é nativo: o AccessKit o anuncia e o app não repete.
 
 const ThemeFactory := preload("res://scripts/ui/theme_factory.gd")
 const EditField := preload("res://scripts/ui/edit_field.gd")
+const EditArea := preload("res://scripts/ui/edit_area.gd")
 const FocusZone := preload("res://scripts/ui/focus_zone.gd")
 
 const RANKS := ["troublesome", "dangerous", "formidable", "extreme", "epic"]
@@ -24,9 +26,9 @@ const HELP_LIST := (
 	"Fichas. Setas navegam, Enter abre uma ficha ou cria uma nova, Delete exclui a ficha selecionada."
 )
 const HELP_SHEET := (
-	"Ficha aberta. Setas navegam, Page Up e Page Down pulam de seção. "
+	"Ficha aberta. Setas navegam, Control mais cima ou baixo pulam de seção ou grupo. "
 	+ "Esquerda e direita ajustam números e escolhem caixas. Enter edita, marca ou escolhe. "
-	+ "R rola o item. M marca progresso, Shift M desmarca. B queima momentum. "
+	+ "R rola o item, Shift R rola em privado. M marca progresso, N desmarca. B queima momentum. "
 	+ "Delete remove um item. Escape volta à lista de fichas."
 )
 
@@ -35,6 +37,7 @@ var _you_name := ""
 var _zone: PanelContainer
 var _view: RichTextLabel
 var _edit: LineEdit
+var _area: TextEdit
 
 var _mode := "browse"  # browse | choice | edit
 var _rows: Array[Dictionary] = []
@@ -79,6 +82,12 @@ func _ready() -> void:
 	_edit.text_submitted.connect(_on_edit_submitted)
 	_edit.cancelled.connect(_on_edit_cancelled)
 	add_child(_edit)
+
+	_area = EditArea.new()
+	_area.visible = false
+	_area.submitted.connect(_on_edit_submitted)
+	_area.cancelled.connect(_on_edit_cancelled)
+	add_child(_area)
 
 	_client.sheet_changed.connect(_on_sheet_changed)
 	_client.sheet_removed.connect(_on_sheet_removed)
@@ -167,16 +176,16 @@ func _row_text(row: Dictionary) -> String:
 		"new":
 			return "Nova ficha de %s" % row["template_name"]
 		"section":
-			return "Seção %s" % row["title"]
+			return "%s, seção" % row["title"]
 		"list_head":
-			return "%s, %s" % [row["field"]["label"], _plural((_value(row["field"]) as Array).size(), "item", "itens")]
+			return "%s, grupo, %s" % [row["field"]["label"], _plural((_value(row["field"]) as Array).size(), "item", "itens")]
 		"list_item":
 			var items: Array = _value(row["field"])
 			return "%s %d: %s" % [row["field"]["itemLabel"], int(row["index"]) + 1, items[row["index"]]]
 		"list_add":
 			return "Adicionar %s" % str(row["field"]["itemLabel"]).to_lower()
 		"track_head":
-			return "%s, %s" % [row["field"]["label"], _plural((_value(row["field"]) as Array).size(), "trilha", "trilhas")]
+			return "%s, grupo, %s" % [row["field"]["label"], _plural((_value(row["field"]) as Array).size(), "trilha", "trilhas")]
 		"track_item":
 			var track: Dictionary = (_value(row["field"]) as Array)[row["index"]]
 			return "%s. %s" % [track["name"], _progress_text(str(track["rank"]), int(track["ticks"]))]
@@ -198,20 +207,18 @@ func _field_text(field: Dictionary) -> String:
 			return "%s: %s" % [label, "marcado" if value else "desmarcado"]
 		"checks":
 			var boxes: Array = value
-			var marked := boxes.count(true)
 			_box = clampi(_box, 0, maxi(0, boxes.size() - 1))
-			var box_name: String = (
-				str(field["labels"][_box]) if field.has("labels") and _box < field["labels"].size()
-				else "caixa %d" % (_box + 1)
-			)
-			return "%s: %d de %d marcadas. %s, %s" % [
-				label, marked, boxes.size(), box_name.capitalize() if not field.has("labels") else box_name,
-				"marcada" if boxes[_box] else "desmarcada",
+			var box_label := ""
+			if field.has("labels") and _box < field["labels"].size():
+				box_label = str(field["labels"][_box]) + " "
+			return "%s, %s%s, caixa %d de %d" % [
+				label, box_label, "marcada" if boxes[_box] else "desmarcada", _box + 1, boxes.size()
 			]
 		"progress":
 			var progress: Dictionary = value
 			return "%s: %s" % [label, _progress_text(str(progress["rank"]), int(progress["ticks"]))]
-	var text := str(value)
+	var text := "\n".join(value) if value is Array else str(value)
+	text = text.strip_edges().replace("\n", ". ")
 	return "%s: %s" % [label, text if not text.is_empty() else "vazio"]
 
 
@@ -263,7 +270,10 @@ func _on_zone_focus() -> void:
 
 
 func _on_key(key: InputEventKey) -> void:
-	if key.ctrl_pressed or key.alt_pressed or key.meta_pressed:
+	if key.alt_pressed or key.meta_pressed:
+		return
+	var jump := key.keycode == KEY_UP or key.keycode == KEY_DOWN
+	if key.ctrl_pressed and not (jump and _mode == "browse" and not _character_id.is_empty()):
 		return
 	var handled := false
 	if _mode == "choice":
@@ -345,6 +355,9 @@ func _list_key(key: InputEventKey) -> bool:
 
 
 func _sheet_key(key: InputEventKey) -> bool:
+	if key.ctrl_pressed:
+		_jump_section(-1 if key.keycode == KEY_UP else 1)
+		return true
 	if _navigate(key):
 		return true
 	var row := _rows[_cursor] if not _rows.is_empty() else {}
@@ -354,10 +367,6 @@ func _sheet_key(key: InputEventKey) -> bool:
 			Sfx.play("close_input")
 		KEY_H:
 			Speech.say(HELP_SHEET, true)
-		KEY_PAGEUP:
-			_jump_section(-1)
-		KEY_PAGEDOWN:
-			_jump_section(1)
 		KEY_LEFT:
 			_adjust(-1, row)
 		KEY_RIGHT:
@@ -368,10 +377,13 @@ func _sheet_key(key: InputEventKey) -> bool:
 				_activate(row)
 		KEY_R:
 			if not key.echo:
-				_roll(row)
+				_roll(row, key.shift_pressed)
 		KEY_M:
 			if not key.echo:
-				_mark(-1 if key.shift_pressed else 1, row)
+				_mark(1, row)
+		KEY_N:
+			if not key.echo:
+				_mark(-1, row)
 		KEY_B:
 			if not key.echo:
 				_client.burn_momentum(_character_id)
@@ -386,7 +398,7 @@ func _sheet_key(key: InputEventKey) -> bool:
 func _jump_section(direction: int) -> void:
 	var i := _cursor + direction
 	while i >= 0 and i < _rows.size():
-		if _rows[i]["kind"] == "section":
+		if ["section", "list_head", "track_head"].has(_rows[i]["kind"]):
 			_go_to(i)
 			return
 		i += direction
@@ -471,6 +483,22 @@ func _activate(row: Dictionary) -> void:
 							"track": {"id": _new_id(), "name": text, "rank": rank},
 						}), RANKS.find("formidable"))
 			)
+		"track_item":
+			var field: Dictionary = row["field"]
+			var tracks: Array = (_value(field) as Array).duplicate(true)
+			var index: int = row["index"]
+			var track: Dictionary = tracks[index]
+			_begin_edit(
+				"Nome da trilha",
+				str(track["name"]),
+				func(text: String) -> void:
+					if text.strip_edges().is_empty():
+						return
+					_begin_choice("Graduação", _rank_options(), func(rank: String) -> void:
+						tracks[index]["name"] = text
+						tracks[index]["rank"] = rank
+						_set_field(field, tracks), RANKS.find(track["rank"]))
+			)
 		"field":
 			_activate_field(row["field"])
 		_:
@@ -491,8 +519,15 @@ func _activate_field(field: Dictionary) -> void:
 						return
 					_set_field(field, text.strip_edges().to_int())
 			)
-		"text", "textarea":
+		"text":
 			_begin_edit(str(field["label"]), str(value), func(text: String) -> void: _set_field(field, text))
+		"textarea":
+			_begin_edit(
+				str(field["label"]),
+				"\n".join(value) if value is Array else str(value),
+				func(text: String) -> void: _set_field(field, text),
+				true
+			)
 		"checkbox":
 			Sfx.play("tick", 1.2 if not value else 0.8)
 			_set_field(field, not value)
@@ -528,7 +563,7 @@ func _rank_options() -> Array:
 	return options
 
 
-func _roll(row: Dictionary) -> void:
+func _roll(row: Dictionary, private_roll: bool = false) -> void:
 	if row.is_empty():
 		return
 	var field: Dictionary = row.get("field", {})
@@ -537,11 +572,11 @@ func _roll(row: Dictionary) -> void:
 		or (field["type"] == "progress" and field.get("rollable", false))
 	):
 		Sfx.play("activate")
-		_client.roll_field(_character_id, field["id"])
+		_client.roll_field(_character_id, field["id"], "", private_roll)
 	elif row["kind"] == "track_item" and field.get("rollable", false):
 		var track: Dictionary = (_value(field) as Array)[row["index"]]
 		Sfx.play("activate")
-		_client.roll_field(_character_id, field["id"], str(track["id"]))
+		_client.roll_field(_character_id, field["id"], str(track["id"]), private_roll)
 	else:
 		Sfx.play("error")
 		Speech.say("Este item não rola dados.", true)
@@ -653,20 +688,29 @@ func _choice_key(key: InputEventKey) -> bool:
 	return true
 
 
-func _begin_edit(label: String, initial: String, done: Callable) -> void:
+func _begin_edit(label: String, initial: String, done: Callable, multiline: bool = false) -> void:
 	_mode = "edit"
 	_edit_done = done
-	_edit.setup(label, "Enter confirma, Escape cancela.")
-	_edit.text = initial
-	_edit.caret_column = initial.length()
-	_edit.visible = true
-	_edit.grab_focus()
+	if multiline:
+		_area.setup(label, "Enter pula linha, Control Enter confirma, Escape cancela.")
+		_area.text = initial
+		_area.visible = true
+		_area.grab_focus()
+		_area.set_caret_line(_area.get_line_count() - 1)
+		_area.set_caret_column(_area.get_line(_area.get_line_count() - 1).length())
+	else:
+		_edit.setup(label, "Enter confirma, Escape cancela.")
+		_edit.text = initial
+		_edit.caret_column = initial.length()
+		_edit.visible = true
+		_edit.grab_focus()
 	Sfx.play("open_input")
 
 
 func _end_edit() -> void:
 	_mode = "browse"
 	_edit.visible = false
+	_area.visible = false
 	_silent_focus = true
 	_zone.grab_focus()
 
@@ -705,6 +749,7 @@ func _on_sheet_removed(character_id: String) -> void:
 	if character_id == _character_id:
 		_mode = "browse"
 		_edit.visible = false
+		_area.visible = false
 		_show_list()
 		Speech.say("A ficha foi excluída. Voltando à lista de fichas.", true)
 	elif _character_id.is_empty():

@@ -32,7 +32,7 @@ Deno.test("rolagem é resolvida no servidor, com o texto acessível", () => {
   );
   if (!("entry" in out)) throw new Error("esperava entrada");
   assertEquals(out.entry!.kind, "roll");
-  assertEquals(out.entry!.text, "Ironsworn Ferro. Dado de ação 5 +2 = 7, contra 4 e 9. Acerto parcial.");
+  assertEquals(out.entry!.text, "Acerto parcial, 7 contra 4 e 9 · Ferro, d6+2 contra 2d10, dado de ação 5");
   assertEquals(out.entry!.roll?.kind, "ironsworn");
 });
 
@@ -145,7 +145,8 @@ Deno.test("ficha: rolar de um campo vai para o histórico e queimar momentum rei
   );
   if (!("entry" in rolled)) throw new Error("esperava entrada");
   assertEquals(rolled.entry!.roll?.kind, "ironsworn");
-  assertEquals(rolled.entry!.text.startsWith("Kaja: "), true);
+  assertEquals(rolled.entry!.author, "Kaja");
+  assertEquals(rolled.entry!.text.includes("Kaja"), false);
 
   const burned = handleClientMessage(room, ana, { type: "sheet:burn", characterId: sheet.id });
   if (!("entry" in burned)) throw new Error("esperava entrada");
@@ -166,3 +167,18 @@ Deno.test("ficha: excluir remove e rolar em campo sem rolagem é erro", () => {
   assertEquals(room.characters.length, 0);
 });
 
+
+Deno.test("ficha: rolagem privada não entra no histórico e medidores rolam", () => {
+  const room = SHEET_ROOM();
+  const sheet = createSheet(room, ana, "template.ironsworn");
+  const out = handleClientMessage(
+    room,
+    ana,
+    { type: "sheet:roll", characterId: sheet.id, fieldId: "iron.meter.health", private: true },
+    seq(face(3, 6), face(2, 10), face(8, 10)),
+  );
+  if (!("privateEntry" in out) || !out.privateEntry) throw new Error("esperava rolagem privada");
+  assertEquals(out.entry, undefined);
+  assertEquals([out.privateEntry.private, out.privateEntry.author], [true, "Kaja"]);
+  assertEquals(room.history.length, 0);
+});

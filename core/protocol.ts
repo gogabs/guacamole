@@ -42,6 +42,8 @@ export interface ChatEntry {
   text: string;
   roll?: Roll;
   action?: SafetyAction;
+  /** Rolagem privada: enviada só a quem rolou, fora do histórico da mesa. */
+  private?: boolean;
 }
 
 /** Ficha numa mesa. Só quem criou (ou o anfitrião) a edita; todos a veem. */
@@ -58,7 +60,14 @@ export type ClientMessage =
   | { type: "sheet:rename"; characterId: string; name: string }
   | { type: "sheet:op"; characterId: string; op: SheetOp }
   /** Rola a partir de um campo; o resultado entra no histórico da mesa. */
-  | { type: "sheet:roll"; characterId: string; fieldId: string; trackId?: string; extra?: number }
+  | {
+    type: "sheet:roll";
+    characterId: string;
+    fieldId: string;
+    trackId?: string;
+    extra?: number;
+    private?: boolean;
+  }
   /** Queima o momentum sobre a última rolagem de Ironsworn desta ficha. */
   | { type: "sheet:burn"; characterId: string };
 
@@ -142,7 +151,14 @@ export function parseClientMessage(data: string): ClientMessage {
       const extra = typeof message.extra === "number" && Number.isFinite(message.extra)
         ? message.extra
         : undefined;
-      return { type: "sheet:roll", characterId, fieldId, trackId, extra };
+      return {
+        type: "sheet:roll",
+        characterId,
+        fieldId,
+        trackId,
+        extra,
+        private: message.private === true,
+      };
     }
   }
   throw new ProtocolError("Tipo de mensagem desconhecido.");

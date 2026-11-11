@@ -191,7 +191,7 @@ func _handle_history_key(key: InputEventKey) -> bool:
 			_move(10)
 		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
 			if cursor >= 0:
-				Speech.say(_speech_text(entries[cursor]), true)
+				Speech.say(_spoken(entries[cursor]), true)
 		_:
 			return false
 	return true
@@ -218,7 +218,7 @@ func _go_to(index: int) -> void:
 	cursor = clampi(index, 0, entries.size() - 1)
 	var position := float(cursor) / maxf(1.0, entries.size() - 1.0)
 	Sfx.play("tick", 0.75 + 0.6 * position)
-	Speech.say(_speech_text(entries[cursor]), true)
+	Speech.say(_spoken(entries[cursor]), true)
 	_render()
 
 
@@ -244,9 +244,16 @@ func _speech_text(entry: Dictionary) -> String:
 	var kind: String = entry.get("kind", "text")
 	var text: String = entry.get("text", "")
 	var author: String = entry.get("author", "")
+	if entry.get("private", false):
+		text = "Privado: " + text
 	if kind == "system" or kind == "local" or author.is_empty():
 		return text
 	return "%s: %s" % [author, text]
+
+
+## O separador visual das rolagens vira uma pausa na fala, que é mais confiável que ler o símbolo.
+func _spoken(entry: Dictionary) -> String:
+	return _speech_text(entry).replace(" · ", ". ")
 
 
 func _display_text(entry: Dictionary) -> String:
@@ -275,17 +282,17 @@ func _on_entry(entry: Dictionary) -> void:
 	match kind:
 		"safety":
 			Sfx.play("safety")
-			Speech.say(_speech_text(entry), true)
+			Speech.say(_spoken(entry), true)
 		"roll":
 			Sfx.play("roll")
-			Speech.say(_speech_text(entry), false)
+			Speech.say(_spoken(entry), false)
 		"system":
 			Sfx.play("join" if str(entry.get("text", "")).contains("entrou") else "leave")
-			Speech.say(_speech_text(entry), false)
+			Speech.say(_spoken(entry), false)
 		_:
 			if not mine:
 				Sfx.play("msg_in")
-				Speech.say(_speech_text(entry), false)
+				Speech.say(_spoken(entry), false)
 
 
 func _on_presence(players: Array) -> void:

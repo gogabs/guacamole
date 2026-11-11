@@ -176,6 +176,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         broadcast(room.id, { type: "sheet:removed", characterId: outcome.removed });
         scheduleSave();
       }
+      if (outcome.privateEntry) send(socket, { type: "chat:entry", entry: outcome.privateEntry });
       if (outcome.entry) broadcastEntry(room, outcome.entry);
     };
 

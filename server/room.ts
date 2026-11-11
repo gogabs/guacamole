@@ -30,7 +30,7 @@ export interface RoomRecord {
   nextSeq: number;
   characters: RoomCharacter[];
   /** Última rolagem de Ironsworn por ficha, para queimar momentum. Só em memória útil. */
-  lastRolls: Record<string, IronswornRoll>;
+  lastRolls: Record<string, { roll: IronswornRoll; private: boolean }>;
 }
 
 export function createRoomRecord(
@@ -94,9 +94,17 @@ export function systemEntry(room: RoomRecord, text: string): ChatEntry {
 
 export type MessageOutcome =
   | { error: string }
-  | { entry?: ChatEntry; character?: RoomCharacter; removed?: string };
+  | { entry?: ChatEntry; privateEntry?: ChatEntry; character?: RoomCharacter; removed?: string };
 
 const MAX_CHARACTERS = 50;
+
+/** Rolagem privada: só quem rolou a recebe; não entra no histórico nem é salva. */
+function rollOutcome(room: RoomRecord, draft: EntryDraft, hidden: boolean): MessageOutcome {
+  if (!hidden) return { entry: pushEntry(room, draft) };
+  return {
+    privateEntry: { id: crypto.randomUUID(), seq: 0, at: new Date().toISOString(), private: true, ...draft },
+  };
+}
 
 function canEdit(character: RoomCharacter, player: Player): boolean {
   return player.role === "host" || character.owner === player.name;
@@ -148,32 +156,19 @@ function handleSheetMessage(
           trackId: message.trackId,
           extra: message.extra,
         });
-        if (roll.kind === "ironsworn") room.lastRolls[character.id] = roll;
-        return {
-          entry: pushEntry(room, {
-            author: player.name,
-            kind: "roll",
-            text: `${character.name}: ${describeRoll(roll)}`,
-            roll,
-          }),
-        };
+        const hidden = message.private === true;
+        if (roll.kind === "ironsworn") room.lastRolls[character.id] = { roll, private: hidden };
+        return rollOutcome(room, { author: character.name, kind: "roll", text: describeRoll(roll), roll }, hidden);
       }
 
       case "sheet:burn": {
         const last = room.lastRolls[character.id];
         if (!last) return { error: "Não há rolagem de Ironsworn para melhorar." };
-        const burned = burnMomentum(template, character, last);
+        const burned = burnMomentum(template, character, last.roll);
         Object.assign(character, burned.sheet);
         delete room.lastRolls[character.id];
-        return {
-          character,
-          entry: pushEntry(room, {
-            author: player.name,
-            kind: "roll",
-            text: `${character.name} queimou o momentum. ${describeRoll(burned.roll)}`,
-            roll: burned.roll,
-          }),
-        };
+        const draft = { author: character.name, kind: "roll" as const, text: describeRoll(burned.roll), roll: burned.roll };
+        return { character, ...rollOutcome(room, draft, last.private) };
       }
     }
   } catch (error) {
@@ -200,7 +195,7 @@ export function handleClientMessage(
   if (message.type === "safety:signal") {
     return {
       entry: pushEntry(room, {
-        author: player.name,
+        author: "",
         kind: "safety",
         text: safetyLabel(message.action),
         action: message.action,
@@ -227,7 +222,7 @@ export function handleClientMessage(
     case "safety":
       return {
         entry: pushEntry(room, {
-          author: player.name,
+          author: "",
           kind: "safety",
           text: result.text,
           action: result.action,

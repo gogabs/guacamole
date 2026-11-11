@@ -18,6 +18,7 @@ const meter = (id: string, label: string): NumberField => ({
   min: 0,
   max: 5,
   default: 5,
+  roll: "ironsworn",
 });
 
 const condition = (id: string, label: string): CheckboxField => ({
@@ -109,10 +110,9 @@ export const IRONSWORN_TEMPLATE: SheetTemplate = {
       fields: [
         {
           id: "iron.assets",
-          type: "list",
+          type: "textarea",
           label: "Ativos",
-          itemLabel: "Ativo",
-          maxItems: 20,
+          description: "Um ativo por linha, com as habilidades marcadas.",
         },
       ],
     },

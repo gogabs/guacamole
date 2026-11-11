@@ -202,39 +202,51 @@ export function outcomeLabel(outcome: Outcome): string {
 
 const FATE_FACE: Record<number, string> = { [-1]: "menos", 0: "vazio", 1: "mais" };
 
-/** Texto completo da rolagem, pensado para ser lido por leitor de tela. */
+/** Separa o resultado do detalhe. Clientes de voz podem trocá-lo por uma pausa. */
+export const ROLL_SEPARATOR = " · ";
+
+const MATCH_SUFFIX = ", coincidência";
+
+function detail(...parts: Array<string | undefined>): string {
+  return parts.filter(Boolean).join(", ");
+}
+
+function versus(roll: { challenge: [number, number] }): string {
+  return `contra ${roll.challenge[0]} e ${roll.challenge[1]}`;
+}
+
+/**
+ * Texto da rolagem, pensado para leitor de tela:
+ * `resultado · rótulo, fórmula, dados individuais`.
+ */
 export function describeRoll(roll: Roll): string {
   switch (roll.kind) {
     case "generic": {
       const parts = roll.terms.map((term) =>
         `${term.sign < 0 ? "-" : ""}${term.count}d${term.sides}: ${term.rolls.join(", ")}`
       );
-      const modifier = roll.modifier === 0 ? "" : ` ${signed(roll.modifier)}`;
-      return `Rolagem ${roll.expression}. ${parts.join("; ")}${modifier}. Total ${roll.total}.`;
+      return `Total ${roll.total}${ROLL_SEPARATOR}${detail(roll.expression, parts.join("; "))}`;
     }
     case "fate": {
-      const faces = roll.dice.map((die) => FATE_FACE[die]).join(", ");
-      const sum = roll.dice.reduce<number>((a, b) => a + b, 0);
-      const name = roll.label ? ` ${roll.label}` : "";
-      return `Fate${name}. Dados: ${faces}, soma ${signed(sum)}. Modificador ${signed(roll.modifier)}. ` +
-        `Resultado ${signed(roll.total)}, ${roll.ladder}.`;
+      const faces = roll.dice.map((die) => FATE_FACE[die]).join(" ");
+      const formula = roll.modifier === 0 ? "4dF" : `4dF${signed(roll.modifier)}`;
+      return `${signed(roll.total)}, ${roll.ladder}${ROLL_SEPARATOR}${detail(roll.label, formula, faces)}`;
     }
     case "ironsworn": {
-      const name = roll.label ? ` ${roll.label}` : "";
+      const match = roll.match ? MATCH_SUFFIX : "";
       if (roll.burnedMomentum !== undefined) {
-        return `Ironsworn${name}. Momentum queimado: ${roll.burnedMomentum} no lugar do dado de ação, ` +
-          `contra ${roll.challenge[0]} e ${roll.challenge[1]}. ${outcomeLabel(roll.outcome)}.` +
-          (roll.match ? " Coincidência nos dados de desafio!" : "");
+        return `${outcomeLabel(roll.outcome)}, momentum queimado ${roll.burnedMomentum} ${versus(roll)}${match}` +
+          `${ROLL_SEPARATOR}${detail(roll.label, "momentum no lugar do dado de ação")}`;
       }
-      const capped = roll.actionDie + roll.modifier > 10 ? " (limitado a 10)" : "";
-      return `Ironsworn${name}. Dado de ação ${roll.actionDie} ${signed(roll.modifier)} = ${roll.actionScore}${capped}, ` +
-        `contra ${roll.challenge[0]} e ${roll.challenge[1]}. ${outcomeLabel(roll.outcome)}.` +
-        (roll.match ? " Coincidência nos dados de desafio!" : "");
+      const formula = `d6${roll.modifier === 0 ? "" : signed(roll.modifier)} contra 2d10`;
+      const capped = roll.actionDie + roll.modifier > 10 ? "pontuação limitada a 10" : undefined;
+      return `${outcomeLabel(roll.outcome)}, ${roll.actionScore} ${versus(roll)}${match}` +
+        `${ROLL_SEPARATOR}${detail(roll.label, formula, `dado de ação ${roll.actionDie}`, capped)}`;
     }
     case "progress": {
-      const name = roll.label ? ` ${roll.label}` : "";
-      return `Rolagem de progresso${name}. Progresso ${roll.progress} contra ${roll.challenge[0]} e ${roll.challenge[1]}. ` +
-        `${outcomeLabel(roll.outcome)}.` + (roll.match ? " Coincidência nos dados de desafio!" : "");
+      const match = roll.match ? MATCH_SUFFIX : "";
+      return `${outcomeLabel(roll.outcome)}, progresso ${roll.progress} ${versus(roll)}${match}` +
+        `${ROLL_SEPARATOR}${detail(roll.label, "rolagem de progresso")}`;
     }
   }
 }

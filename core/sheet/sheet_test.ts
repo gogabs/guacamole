@@ -170,7 +170,7 @@ Deno.test("burnMomentum: melhora o resultado e reinicia o medidor", () => {
   assertEquals(sheet.values["iron.momentum"], 8);
   assertEquals(
     describeRoll(burned.roll),
-    "Ironsworn Ferro. Momentum queimado: 8 no lugar do dado de ação, contra 5 e 7. Acerto forte.",
+    "Acerto forte, momentum queimado 8 contra 5 e 7 · Ferro, momentum no lugar do dado de ação",
   );
 
   // Com momentum baixo, queimar não ajuda.
