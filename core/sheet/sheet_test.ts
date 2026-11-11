@@ -169,10 +169,26 @@ Deno.test("trilhas: adicionar, marcar por graduação, desmarcar e remover", () 
 
 Deno.test("progresso nunca passa de 40 marcas", () => {
   let sheet = createCharacter(IRONSWORN_TEMPLATE, "c1", "Ana");
+  sheet = applySheetOp(IRONSWORN_TEMPLATE, sheet, {
+    type: "track:add",
+    fieldId: "iron.bonds",
+    track: { id: "b1", name: "Vínculo com a aldeia", rank: "troublesome" },
+  });
   for (let i = 0; i < 5; i++) {
-    sheet = applySheetOp(IRONSWORN_TEMPLATE, sheet, { type: "progress:mark", fieldId: "iron.bonds", times: 10 });
+    sheet = applySheetOp(IRONSWORN_TEMPLATE, sheet, { type: "progress:mark", fieldId: "iron.bonds", trackId: "b1", times: 10 });
   }
-  assertEquals((sheet.values["iron.bonds"] as ProgressValue).ticks, 40);
+  assertEquals((sheet.values["iron.bonds"] as TrackValue[])[0].ticks, 40);
+});
+
+Deno.test("Ironsworn: os vínculos são várias trilhas, e o vínculo único antigo é aproveitado", () => {
+  const field = findField(IRONSWORN_TEMPLATE, "iron.bonds");
+  assertEquals(field.type === "tracks" && field.rollable, true);
+  const old = createCharacter(IRONSWORN_TEMPLATE, "x", "Caio");
+  old.values["iron.bonds"] = { rank: "formidable", ticks: 12 } as unknown as TrackValue[];
+  const [track] = migrateCharacter(IRONSWORN_TEMPLATE, old).values["iron.bonds"] as TrackValue[];
+  assertEquals([track.name, track.ticks], ["Vínculos", 12]);
+  old.values["iron.bonds"] = { rank: "formidable", ticks: 0 } as unknown as TrackValue[];
+  assertEquals(migrateCharacter(IRONSWORN_TEMPLATE, old).values["iron.bonds"], []);
 });
 
 Deno.test("rollFromField: perícia Fate com bônus extra", () => {

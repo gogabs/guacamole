@@ -89,6 +89,13 @@ export function importCharacter(template: SheetTemplate, id: string, data: Recor
       sheet.values[field.id] = coerceValue(field, raw[field.id]);
     } catch (error) {
       if (!(error instanceof SheetError)) throw error;
+      // Um valor de um formato antigo (como a trilha única de vínculos) ainda pode ser aproveitado.
+      const old = migrateCharacter(template, { ...sheet, values: { [field.id]: raw[field.id] as FieldValue } });
+      try {
+        sheet.values[field.id] = coerceValue(field, old.values[field.id]);
+      } catch (inner) {
+        if (!(inner instanceof SheetError)) throw inner;
+      }
     }
   }
   return sheet;
@@ -99,6 +106,12 @@ export function migrateCharacter(template: SheetTemplate, sheet: CharacterSheet)
   const values = { ...sheet.values };
   for (const field of allFields(template)) {
     const value = values[field.id];
+    // Antes havia uma trilha só de vínculos; ela vira a primeira trilha da lista.
+    if (field.type === "tracks" && typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const old = value as ProgressValue;
+      values[field.id] = old.ticks > 0 ? [{ id: "vinculos", name: "Vínculos", rank: old.rank, ticks: old.ticks }] : [];
+      continue;
+    }
     const wasText = typeof value === "string";
     const wasList = field.type === "cards" && Array.isArray(value) && value.some((item) => typeof item === "string");
     if (((field.type === "list" || field.type === "cards") && wasText) || wasList) {

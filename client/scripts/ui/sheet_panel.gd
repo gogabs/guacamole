@@ -65,6 +65,7 @@ var _pending_create := false
 var _pending_pick: Dictionary = {}  # campo de cartas à espera do conteúdo do compêndio
 var _card_field: Dictionary = {}  # campo e id da carta aberta; vazio na ficha
 var _card_id := ""
+var _pending_add: Dictionary = {}  # campo de cartas à espera de o compêndio entrar na mesa
 var _card_return := 0
 var _owner_pick := ""  # quem Enter receberia a ficha, escolhido com esquerda e direita
 var _announce_next := false
@@ -119,7 +120,9 @@ func _ready() -> void:
 	_client.sheet_changed.connect(_on_sheet_changed)
 	_client.sheet_removed.connect(_on_sheet_removed)
 	_client.compendium_item_received.connect(_on_compendium_item)
+	_client.compendiums_changed.connect(_on_compendiums_changed)
 	_client.server_error.connect(func(_message: String) -> void:
+		_pending_add = {}
 		_announce_next = false
 		_pending_pick = {}
 		_pending_create = false)
@@ -923,6 +926,8 @@ func _activate(row: Dictionary) -> void:
 		"card_add":
 			if _has_source(row["field"]):
 				_pick_from_compendium(row["field"])
+			elif row["field"].has("source"):
+				_offer_compendium(row["field"])
 			else:
 				_add_card_free(row["field"])
 		"card_title":
@@ -1029,6 +1034,30 @@ func _add_list_text(field: Dictionary) -> void:
 func _has_source(field: Dictionary) -> bool:
 	var source: Dictionary = field.get("source", {})
 	return not source.is_empty() and _client.has_compendium(str(source["compendium"]))
+
+
+## O compêndio da lista ainda não está na mesa: oferece pôr (qualquer um pode) e escolher dele, ou escrever.
+func _offer_compendium(field: Dictionary) -> void:
+	var id := str(field["source"]["compendium"])
+	var name := str(_client.compendium_summary(id).get("name", id))
+	_begin_choice("Escolher %s" % str(field["itemLabel"]).to_lower(), [
+		{"label": "Escolher do compêndio %s, que será adicionado à mesa" % name, "value": true},
+		{"label": "Escrever à mão", "value": false},
+	], func(use_compendium: bool) -> void:
+		if not use_compendium:
+			_add_card_free(field)
+			return
+		_pending_add = field
+		_client.add_compendium(id))
+
+
+func _on_compendiums_changed(_ids: Array) -> void:
+	if _pending_add.is_empty() or _mode != "browse" or _character_id.is_empty():
+		return
+	if _has_source(_pending_add):
+		var field := _pending_add
+		_pending_add = {}
+		_pick_from_compendium(field)
 
 
 func _empty_card(title: String, text: String = "") -> Dictionary:

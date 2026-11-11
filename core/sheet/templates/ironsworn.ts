@@ -90,9 +90,9 @@ export const IRONSWORN_TEMPLATE: SheetTemplate = {
         },
         {
           id: "iron.bonds",
-          type: "progress",
+          type: "tracks",
           label: "Vínculos",
-          ranked: false,
+          maxItems: 20,
           rollable: true,
         },
         {
