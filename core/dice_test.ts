@@ -4,12 +4,36 @@ import {
   fateLadder,
   ironswornOutcome,
   parseDiceExpression,
+  rollDungeonWorld,
   rollFate,
   rollGeneric,
   rollIronsworn,
   rollProgress,
 } from "./dice.ts";
 import { face, fateFace, seq } from "./test_util.ts";
+
+Deno.test("rollDungeonWorld: 2d6 mais atributo, vantagem e desvantagem", () => {
+  const six = (...dice: number[]) => seq(...dice.map((d) => face(d, 6)));
+
+  const plain = rollDungeonWorld(1, six(4, 5), "Força");
+  assertEquals([plain.kept, plain.total, plain.outcome], [[4, 5], 10, "strong"]);
+  assertEquals(describeRoll(plain), "Acerto forte, 10 · Força, 2d6+1, dados 4 e 5");
+
+  const adv = rollDungeonWorld(0, six(2, 4, 6), "Destreza", 1);
+  assertEquals([adv.dice, adv.kept, adv.total, adv.outcome], [[2, 4, 6], [4, 6], 10, "strong"]);
+
+  const dis = rollDungeonWorld(0, six(2, 4, 6), "Destreza", -1, ["Assustado"]);
+  assertEquals([dis.kept, dis.total, dis.outcome], [[2, 4], 6, "miss"]);
+  assertEquals(
+    describeRoll(dis),
+    "Erro, 6 · Destreza, 2d6, com desvantagem, dados 2, 4, 6, valem 2 e 4, desvantagem por Assustado",
+  );
+
+  // Duas vantagens: um 7 a 9 sobe para forte; duas desvantagens: desce para erro.
+  assertEquals(rollDungeonWorld(0, six(2, 3, 4), "x", 2).outcome, "strong");
+  assertEquals(rollDungeonWorld(0, six(4, 4, 5), "x", -2).outcome, "miss");
+  assertEquals(rollDungeonWorld(0, six(3, 4), "x").outcome, "weak");
+});
 
 Deno.test("parseDiceExpression: expressões válidas", () => {
   assertEquals(parseDiceExpression("2d6+3"), { terms: [{ sign: 1, count: 2, sides: 6 }], modifier: 3 });

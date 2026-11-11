@@ -50,7 +50,25 @@ export interface ProgressRoll {
   match: boolean;
 }
 
-export type Roll = GenericRoll | FateRoll | IronswornRoll | ProgressRoll;
+/** 2d6 + atributo do Dungeon World, com vantagem ou desvantagem (3d6, ficam os dois maiores ou menores). */
+export interface DungeonWorldRoll {
+  kind: "dungeon-world";
+  label?: string;
+  /** Todos os dados rolados; com vantagem ou desvantagem são três. */
+  dice: number[];
+  /** Os dois dados que valem. */
+  kept: [number, number];
+  modifier: number;
+  total: number;
+  /** Vantagens menos desvantagens: positivo é vantagem, negativo desvantagem. */
+  edge: number;
+  /** Com duas ou mais vantagens (ou desvantagens), 7-9 conta como 10+ (ou como 6-). */
+  outcome: Outcome;
+  /** Por que há desvantagem, por exemplo as condições marcadas. */
+  reasons?: string[];
+}
+
+export type Roll = GenericRoll | FateRoll | IronswornRoll | ProgressRoll | DungeonWorldRoll;
 
 export const MAX_DICE_COUNT = 100;
 export const MAX_DICE_SIDES = 1000;
@@ -134,6 +152,38 @@ export function rollIronsworn(modifier: number, rng: Rng, label?: string): Irons
     outcome: ironswornOutcome(actionScore, challenge),
     match: challenge[0] === challenge[1],
   };
+}
+
+/** `edge` é o saldo de vantagens e desvantagens, que se anulam; só os dois maiores ou menores de três dados valem. */
+export function rollDungeonWorld(
+  modifier: number,
+  rng: Rng,
+  label?: string,
+  edge = 0,
+  reasons?: string[],
+): DungeonWorldRoll {
+  const dice = Array.from({ length: edge === 0 ? 2 : 3 }, () => rollDie(rng, 6));
+  const ordered = [...dice].sort((a, b) => a - b);
+  const kept: [number, number] = edge > 0 ? [ordered[1], ordered[2]] : [ordered[0], ordered[1]];
+  const total = kept[0] + kept[1] + modifier;
+  return {
+    kind: "dungeon-world",
+    label,
+    dice,
+    kept,
+    modifier,
+    total,
+    edge,
+    outcome: dungeonWorldOutcome(total, edge),
+    reasons: reasons && reasons.length > 0 ? reasons : undefined,
+  };
+}
+
+/** 10+ forte, 7-9 parcial, 6- erro; com duas ou mais vantagens (desvantagens), o parcial sobe (desce) um grau. */
+export function dungeonWorldOutcome(total: number, edge: number): Outcome {
+  if (total >= 10) return "strong";
+  if (total >= 7) return edge >= 2 ? "strong" : edge <= -2 ? "miss" : "weak";
+  return "miss";
 }
 
 export function rollProgress(progress: number, rng: Rng, label?: string): ProgressRoll {
@@ -242,6 +292,19 @@ export function describeRoll(roll: Roll): string {
       const capped = roll.actionDie + roll.modifier > 10 ? "pontuação limitada a 10" : undefined;
       return `${outcomeLabel(roll.outcome)}, ${roll.actionScore} ${versus(roll)}${match}` +
         `${ROLL_SEPARATOR}${detail(roll.label, formula, `dado de ação ${roll.actionDie}`, capped)}`;
+    }
+    case "dungeon-world": {
+      const formula = roll.modifier === 0 ? "2d6" : `2d6${signed(roll.modifier)}`;
+      const edge = roll.edge === 0
+        ? undefined
+        : `${Math.abs(roll.edge) === 1 ? "" : `${Math.abs(roll.edge)} `}${
+          roll.edge > 0 ? "com vantagem" : "com desvantagem"
+        }`;
+      const dice = roll.edge === 0
+        ? `dados ${roll.dice.join(" e ")}`
+        : `dados ${roll.dice.join(", ")}, valem ${roll.kept.join(" e ")}`;
+      const why = roll.reasons ? `desvantagem por ${roll.reasons.join(", ")}` : undefined;
+      return `${outcomeLabel(roll.outcome)}, ${roll.total}${ROLL_SEPARATOR}${detail(roll.label, formula, edge, dice, why)}`;
     }
     case "progress": {
       const match = roll.match ? MATCH_SUFFIX : "";

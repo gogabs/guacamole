@@ -1,10 +1,23 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { describeRoll } from "../dice.ts";
 import { face, fateFace, seq } from "../test_util.ts";
-import { allFields, coerceValue, createCharacter, defaultValue, findField, SheetError } from "./fields.ts";
+import {
+  allFields,
+  coerceValue,
+  createCharacter,
+  defaultValue,
+  findField,
+  migrateCharacter,
+  SheetError,
+} from "./fields.ts";
 import { applySheetOp, burnMomentum, rollFromField } from "./ops.ts";
-import { BUILT_IN_TEMPLATES, FATE_TEMPLATE, IRONSWORN_TEMPLATE } from "./templates/mod.ts";
-import type { ProgressValue, TrackValue } from "./types.ts";
+import {
+  BUILT_IN_TEMPLATES,
+  DUNGEON_WORLD_TEMPLATE,
+  FATE_TEMPLATE,
+  IRONSWORN_TEMPLATE,
+} from "./templates/mod.ts";
+import type { CardValue, ProgressValue, TrackValue } from "./types.ts";
 
 Deno.test("templates: ids de campo únicos e valores padrão válidos", () => {
   for (const template of BUILT_IN_TEMPLATES) {
@@ -15,6 +28,59 @@ Deno.test("templates: ids de campo únicos e valores padrão válidos", () => {
       assertEquals(coerceValue(field, defaultValue(field)), defaultValue(field), field.id);
     }
   }
+});
+
+Deno.test("Ironsworn: os ativos são cartas com origem no compêndio, e as listas antigas são aproveitadas", () => {
+  const field = findField(IRONSWORN_TEMPLATE, "iron.assets");
+  assertEquals(field.type === "cards" && field.source, { compendium: "ironsworn", item: "assets" });
+  const titles = (sheet: ReturnType<typeof createCharacter>) =>
+    (sheet.values["iron.assets"] as CardValue[]).map((card) => card.title);
+  const old = createCharacter(IRONSWORN_TEMPLATE, "x", "Caio");
+  old.values["iron.assets"] = "Cão\n\n  Aranha Gigante \n" as unknown as string[];
+  assertEquals(titles(migrateCharacter(IRONSWORN_TEMPLATE, old)), ["Cão", "Aranha Gigante"]);
+  old.values["iron.assets"] = ["Cão", "Cão"];
+  const migrated = migrateCharacter(IRONSWORN_TEMPLATE, old);
+  assertEquals(titles(migrated), ["Cão", "Cão"]);
+  assertEquals(new Set((migrated.values["iron.assets"] as CardValue[]).map((card) => card.id)).size, 2);
+});
+
+Deno.test("cartas: medidores e habilidades são validados e limitados", () => {
+  const field = findField(IRONSWORN_TEMPLATE, "iron.assets");
+  const card = {
+    id: "a",
+    title: "Cão",
+    text: "Seu cão é seu companheiro fiel.",
+    details: [{ label: "Nome", value: "Rex" }],
+    meters: [{ label: "Saúde", value: 9, max: 4 }],
+    abilities: [{ name: "Leal", text: "Some +1.", marked: true }, { name: "Feroz", text: "", marked: "sim" }],
+  };
+  const [clean] = coerceValue(field, [card]) as CardValue[];
+  assertEquals(clean.meters, [{ label: "Saúde", value: 4, max: 4 }]);
+  assertEquals(clean.abilities.map((a) => a.marked), [true, false]);
+  assertThrows(() => coerceValue(field, [{ ...card, id: "" }]), SheetError);
+  assertThrows(() => coerceValue(field, [{ ...card, meters: [{ label: "x", value: "1", max: 2 }] }]), SheetError);
+});
+
+Deno.test("Dungeon World: condições marcadas dão desvantagem no atributo ligado a elas", () => {
+  const sheet = createCharacter(DUNGEON_WORLD_TEMPLATE, "x", "Brenna");
+  const six = (...dice: number[]) => seq(...dice.map((d) => face(d, 6)));
+  const roll = (id: string, edge?: number) => rollFromField(DUNGEON_WORLD_TEMPLATE, sheet, id, six(3, 4, 6), { edge });
+
+  sheet.values["dw.stat.int"] = 2;
+  const clear = roll("dw.stat.dex");
+  assertEquals(clear.kind === "dungeon-world" && [clear.edge, clear.total], [0, 7]);
+
+  sheet.values["dw.cond.angry"] = "Marcada";
+  const angry = roll("dw.stat.int");
+  assertEquals(angry.kind === "dungeon-world" && [angry.edge, angry.kept, angry.reasons], [-1, [3, 4], ["Irritado"]]);
+  assertEquals(describeRoll(angry).includes("desvantagem por Irritado"), true);
+
+  const other = roll("dw.stat.dex");
+  assertEquals(other.kind === "dungeon-world" && other.edge, 0, "só a condição ligada ao atributo conta");
+
+  sheet.values["dw.cond.angry"] = "Trancada";
+  const cancelled = roll("dw.stat.int", 1);
+  assertEquals(cancelled.kind === "dungeon-world" && cancelled.edge, 0, "vantagem pedida cancela a desvantagem");
 });
 
 Deno.test("Fate: 19 perícias, todas rolam 4dF", () => {

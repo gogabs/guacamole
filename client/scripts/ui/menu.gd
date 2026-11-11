@@ -52,7 +52,8 @@ func current_id() -> String:
 func announce_current(interrupt: bool = true) -> void:
 	if _items.is_empty():
 		return
-	Speech.say("%s, %d de %d" % [_item_text(_items[index]), index + 1, _items.size()], interrupt)
+	var role := "campo de edição" if _items[index].has("value") else "botão"
+	Speech.say("%s, %s, %d de %d" % [_item_text(_items[index]), role, index + 1, _items.size()], interrupt)
 
 
 func _unhandled_key_input(event: InputEvent) -> void:

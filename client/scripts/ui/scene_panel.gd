@@ -164,6 +164,15 @@ func _current_text() -> String:
 	return _row_text(_rows[_cursor])
 
 
+## O tipo do item, dito ao chegar nele: tudo o que responde a Enter é botão.
+func _focus_text() -> String:
+	if _rows.is_empty():
+		return _current_text()
+	var row := _rows[_cursor]
+	var is_button: bool = row["kind"] != "card" or _can_edit()
+	return "%s, botão" % _current_text() if is_button else _current_text()
+
+
 func _title() -> String:
 	return "Cenas da mesa" if _scenes_view else "Cena: %s" % _active()["name"]
 
@@ -199,7 +208,7 @@ func _on_zone_focus() -> void:
 		_silent_focus = false
 		return
 	if _mode == "browse":
-		Speech.say("%s. %s" % [_title(), _current_text()], false)
+		Speech.say("%s. %s" % [_title(), _focus_text()], false)
 
 
 func _on_key(key: InputEventKey) -> void:
@@ -247,7 +256,7 @@ func _go_to(target: int) -> void:
 	_cursor = clampi(target, 0, _rows.size() - 1)
 	Sfx.play("focus_button", 0.8 + 0.5 * float(_cursor) / maxf(1.0, _rows.size() - 1.0))
 	_render()
-	Speech.say(_current_text(), true)
+	Speech.say(_focus_text(), true)
 
 
 func _confirms(key: InputEventKey) -> bool:

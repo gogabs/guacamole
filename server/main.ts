@@ -1,3 +1,4 @@
+import { compendiumCatalog } from "../core/compendium/mod.ts";
 import {
   type ChatEntry,
   type ClientMessage,
@@ -158,6 +159,8 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         templates: [...BUILT_IN_TEMPLATES],
         characters: room.characters,
         scene: sceneFor(room.scene, player.role === "host"),
+        catalog: compendiumCatalog(),
+        compendiums: room.compendiums,
       });
       broadcast(room.id, { type: "presence:sync", players: playersOf(room.id) });
       broadcastEntry(room, systemEntry(room, `${player.name} entrou na mesa.`));
@@ -172,7 +175,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         send(socket, { type: "error", message: text });
         return;
       }
-      const outcome = handleClientMessage(room, player, message, rng);
+      const outcome = handleClientMessage(room, player, message, rng, playersOf(room.id).map((p) => p.name));
       if ("error" in outcome) {
         send(socket, { type: "error", message: outcome.error });
         return;
@@ -189,6 +192,11 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         broadcast(room.id, { type: "sheet:removed", characterId: outcome.removed });
         scheduleSave();
       }
+      if (outcome.compendiums) {
+        broadcast(room.id, { type: "compendium:sync", compendiums: outcome.compendiums });
+        scheduleSave();
+      }
+      if (outcome.reply) send(socket, outcome.reply);
       if (outcome.privateEntry) send(socket, { type: "chat:entry", entry: outcome.privateEntry });
       if (outcome.entry) broadcastEntry(room, outcome.entry);
     };

@@ -110,9 +110,12 @@ export const IRONSWORN_TEMPLATE: SheetTemplate = {
       fields: [
         {
           id: "iron.assets",
-          type: "textarea",
+          type: "cards",
           label: "Ativos",
-          description: "Um ativo por linha, com as habilidades marcadas.",
+          itemLabel: "Ativo",
+          maxItems: 20,
+          description: "Cada ativo mostra o texto, os campos e as habilidades marcadas. Se a mesa tem o compêndio de Ironsworn, dá para escolher da lista.",
+          source: { compendium: "ironsworn", item: "assets" },
         },
       ],
     },

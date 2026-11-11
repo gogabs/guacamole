@@ -20,7 +20,8 @@ export type FieldValue =
   | boolean[]
   | string[]
   | ProgressValue
-  | TrackValue[];
+  | TrackValue[]
+  | CardValue[];
 
 interface FieldBase {
   /** Estável: usado em rolagens, ações de rede e dados salvos. */
@@ -46,7 +47,12 @@ export interface NumberField extends FieldBase {
   max: number;
   default: number;
   /** Quando presente, o campo tem um botão "rolar" que usa o valor como modificador. */
-  roll?: "fate" | "ironsworn";
+  roll?: "fate" | "ironsworn" | "dungeon-world";
+  /**
+   * Ids de campos (caixa de seleção ou lista de opções) que, marcados, dão desvantagem na rolagem:
+   * as condições do Dungeon World. Uma lista de opções conta quando não está na primeira opção.
+   */
+  disadvantageIf?: string[];
   /** `momentum` permite queimar momentum e voltar para `resetTo`. */
   role?: "momentum";
   resetTo?: number;
@@ -69,6 +75,28 @@ export interface ListField extends FieldBase {
   type: "list";
   itemLabel: string;
   maxItems: number;
+}
+
+/**
+ * Cartas na ficha (ativos, movimentos...): cada uma guarda uma cópia do texto do compêndio, mais os
+ * campos que o jogador preencheu, os medidores e as habilidades marcadas.
+ */
+export interface CardsField extends FieldBase {
+  type: "cards";
+  itemLabel: string;
+  maxItems: number;
+  /** Itens de um compêndio que a mesa pode adicionar para escolher daqui, além de cartas livres. */
+  source?: { compendium: string; item: string };
+}
+
+export interface CardValue {
+  /** Único dentro do campo; vem do cliente. */
+  id: string;
+  title: string;
+  text: string;
+  details: { label: string; value: string }[];
+  meters: { label: string; value: number; max: number }[];
+  abilities: { name: string; text: string; marked: boolean }[];
 }
 
 export interface SelectField extends FieldBase {
@@ -98,6 +126,7 @@ export type SheetField =
   | CheckboxField
   | ChecksField
   | ListField
+  | CardsField
   | SelectField
   | ProgressField
   | TracksField;
@@ -111,13 +140,15 @@ export interface SheetSection {
 export interface SheetTemplate {
   id: string;
   name: string;
-  system: "fate" | "ironsworn" | "custom";
+  system: "fate" | "ironsworn" | "dungeon-world" | "custom";
   sections: SheetSection[];
 }
 
 export interface CharacterSheet {
   id: string;
   name: string;
+  /** Texto curto que aparece na lista de fichas. */
+  description: string;
   templateId: string;
   values: Record<string, FieldValue>;
 }

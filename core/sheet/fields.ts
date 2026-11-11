@@ -1,4 +1,5 @@
 import {
+  type CardValue,
   type CharacterSheet,
   type FieldValue,
   type ProgressValue,
@@ -49,6 +50,7 @@ export function defaultValue(field: SheetField): FieldValue {
     case "checks":
       return Array.from({ length: field.count }, () => false);
     case "list":
+    case "cards":
       return [];
     case "select":
       return field.default;
@@ -59,10 +61,51 @@ export function defaultValue(field: SheetField): FieldValue {
   }
 }
 
+export const MAX_DESCRIPTION = 500;
+
+export function cleanDescription(raw: unknown): string {
+  return (typeof raw === "string" ? raw : "").trim().slice(0, MAX_DESCRIPTION);
+}
+
 export function createCharacter(template: SheetTemplate, id: string, name: string): CharacterSheet {
   const values: Record<string, FieldValue> = {};
   for (const field of allFields(template)) values[field.id] = defaultValue(field);
-  return { id, name: name.trim().slice(0, 80) || "Sem nome", templateId: template.id, values };
+  return { id, name: name.trim().slice(0, 80) || "Sem nome", description: "", templateId: template.id, values };
+}
+
+/**
+ * Monta uma ficha a partir de dados de arquivo. É leniente: um campo ausente ou inválido volta ao
+ * padrão em vez de recusar a ficha inteira, porque o arquivo pode vir de outra versão do modelo.
+ */
+export function importCharacter(template: SheetTemplate, id: string, data: Record<string, unknown>): CharacterSheet {
+  const sheet = createCharacter(template, id, typeof data.name === "string" ? data.name : "");
+  sheet.description = cleanDescription(data.description);
+  const raw = typeof data.values === "object" && data.values !== null
+    ? data.values as Record<string, unknown>
+    : {};
+  for (const field of allFields(template)) {
+    if (!(field.id in raw)) continue;
+    try {
+      sheet.values[field.id] = coerceValue(field, raw[field.id]);
+    } catch (error) {
+      if (!(error instanceof SheetError)) throw error;
+    }
+  }
+  return sheet;
+}
+
+/** Ajusta fichas guardadas por versões anteriores do modelo (um campo que mudou de tipo). */
+export function migrateCharacter(template: SheetTemplate, sheet: CharacterSheet): CharacterSheet {
+  const values = { ...sheet.values };
+  for (const field of allFields(template)) {
+    const value = values[field.id];
+    const wasText = typeof value === "string";
+    const wasList = field.type === "cards" && Array.isArray(value) && value.some((item) => typeof item === "string");
+    if (((field.type === "list" || field.type === "cards") && wasText) || wasList) {
+      values[field.id] = coerceValue(field, value);
+    }
+  }
+  return { ...sheet, values };
 }
 
 /** Valida e normaliza um valor vindo da rede. Números são ajustados; tipos errados lançam. */
@@ -82,11 +125,29 @@ export function coerceValue(field: SheetField, raw: unknown): FieldValue {
       return Array.from({ length: field.count }, (_, i) => raw[i] === true);
     }
     case "list": {
-      if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) throw invalid(field);
-      return (raw as string[])
+      // Um texto vira uma lista, uma linha por item: assim os "Ativos" antigos (texto) são aproveitados.
+      const items = typeof raw === "string" ? raw.split("\n") : raw;
+      if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) throw invalid(field);
+      return (items as string[])
         .map((item) => item.trim().slice(0, 500))
         .filter(Boolean)
         .slice(0, field.maxItems);
+    }
+    case "cards": {
+      // Textos soltos (ativos antigos) viram cartas só com o título.
+      const items = typeof raw === "string" ? raw.split("\n") : raw;
+      if (!Array.isArray(items)) throw invalid(field);
+      const used = new Set<string>();
+      const cards: CardValue[] = [];
+      for (const item of items) {
+        if (cards.length >= field.maxItems) break;
+        const card = coerceCard(field, item, cards.length);
+        if (!card) continue;
+        while (used.has(card.id)) card.id += "+";
+        used.add(card.id);
+        cards.push(card);
+      }
+      return cards;
     }
     case "select": {
       if (typeof raw !== "string" || !field.options.includes(raw)) throw invalid(field);
@@ -107,6 +168,42 @@ export function coerceValue(field: SheetField, raw: unknown): FieldValue {
       return tracks;
     }
   }
+}
+
+/** Uma carta válida, ou `undefined` para um texto vazio. Tamanhos são limitados; o resto lança. */
+function coerceCard(field: SheetField, raw: unknown, index: number): CardValue | undefined {
+  if (typeof raw === "string") {
+    const title = raw.trim().slice(0, 120);
+    return title ? { id: `carta-${index}`, title, text: "", details: [], meters: [], abilities: [] } : undefined;
+  }
+  if (typeof raw !== "object" || raw === null) throw invalid(field);
+  const card = raw as Record<string, unknown>;
+  if (typeof card.id !== "string" || !card.id || typeof card.title !== "string") throw invalid(field);
+  const list = (value: unknown): Record<string, unknown>[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "object" || item === null)) throw invalid(field);
+    return (value as Record<string, unknown>[]).slice(0, 20);
+  };
+  const text = (value: unknown, limit: number): string => {
+    if (typeof value !== "string") throw invalid(field);
+    return value.trim().slice(0, limit);
+  };
+  return {
+    id: card.id.slice(0, 60),
+    title: text(card.title, 120) || "Sem nome",
+    text: card.text === undefined ? "" : text(card.text, 3000),
+    details: list(card.details).map((d) => ({ label: text(d.label, 80), value: text(d.value ?? "", 200) })),
+    meters: list(card.meters).map((m) => {
+      if (typeof m.max !== "number" || typeof m.value !== "number") throw invalid(field);
+      const max = clamp(Math.round(m.max), 1, 99);
+      return { label: text(m.label, 80), max, value: clamp(Math.round(m.value), 0, max) };
+    }),
+    abilities: list(card.abilities).map((a) => ({
+      name: text(a.name ?? "", 120),
+      text: text(a.text ?? "", 1500),
+      marked: a.marked === true,
+    })),
+  };
 }
 
 export function coerceProgress(field: SheetField, raw: unknown): ProgressValue {

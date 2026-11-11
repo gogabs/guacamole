@@ -1,4 +1,5 @@
 import { runChatInput } from "../core/commands.ts";
+import { findCompendium, findCompendiumItem, OracleError, rollOracle } from "../core/compendium/mod.ts";
 import { describeRoll, type IronswornRoll } from "../core/dice.ts";
 import type {
   ChatEntry,
@@ -8,11 +9,12 @@ import type {
   RoomAccess,
   RoomCharacter,
   RoomSummary,
+  ServerMessage,
 } from "../core/protocol.ts";
 import { defaultRng, type Rng } from "../core/rng.ts";
 import { safetyLabel } from "../core/safety.ts";
 import { applySceneOp, createSceneState, SceneError, type SceneState } from "../core/scene.ts";
-import { createCharacter, SheetError } from "../core/sheet/fields.ts";
+import { cleanDescription, createCharacter, importCharacter, SheetError } from "../core/sheet/fields.ts";
 import { applySheetOp, burnMomentum, rollFromField } from "../core/sheet/ops.ts";
 import { BUILT_IN_TEMPLATES } from "../core/sheet/templates/mod.ts";
 
@@ -31,6 +33,8 @@ export interface RoomRecord {
   nextSeq: number;
   characters: RoomCharacter[];
   scene: SceneState;
+  /** Ids dos compêndios adicionados à mesa, na ordem em que entraram. */
+  compendiums: string[];
   /** Última rolagem de Ironsworn por ficha, para queimar momentum. Só em memória útil. */
   lastRolls: Record<string, { roll: IronswornRoll; private: boolean }>;
 }
@@ -53,6 +57,7 @@ export function createRoomRecord(
     nextSeq: 1,
     characters: [],
     scene: createSceneState(),
+    compendiums: [],
     lastRolls: {},
   };
 }
@@ -103,9 +108,14 @@ export type MessageOutcome =
     character?: RoomCharacter;
     removed?: string;
     scene?: SceneState;
+    /** Lista nova de compêndios da mesa, para todos. */
+    compendiums?: string[];
+    /** Resposta só para quem pediu. */
+    reply?: ServerMessage;
   };
 
 const MAX_CHARACTERS = 50;
+const SHEET_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 /** Rolagem privada: só quem rolou a recebe; não entra no histórico nem é salva. */
 function rollOutcome(room: RoomRecord, draft: EntryDraft, hidden: boolean): MessageOutcome {
@@ -124,6 +134,7 @@ function handleSheetMessage(
   player: Player,
   message: Extract<ClientMessage, { type: `sheet:${string}` }>,
   rng: Rng,
+  present: readonly string[],
 ): MessageOutcome {
   try {
     if (message.type === "sheet:create") {
@@ -136,8 +147,42 @@ function handleSheetMessage(
       return { character };
     }
 
+    if (message.type === "sheet:import") {
+      const data = message.sheet;
+      const template = BUILT_IN_TEMPLATES.find((t) => t.id === data.templateId);
+      if (!template) return { error: "Esta ficha usa um modelo que a mesa não conhece." };
+      if (room.characters.length >= MAX_CHARACTERS) return { error: "Há fichas demais nesta mesa." };
+      // O id do arquivo é mantido para que salvar de novo atualize a mesma ficha local.
+      const reusable = typeof data.id === "string" && SHEET_ID.test(data.id) &&
+        !room.characters.some((c) => c.id === data.id);
+      const sheet = importCharacter(template, reusable ? data.id! : crypto.randomUUID(), { ...data });
+      const character: RoomCharacter = { ...sheet, owner: player.name };
+      room.characters.push(character);
+      return { character };
+    }
+
     const character = room.characters.find((c) => c.id === message.characterId);
     if (!character) return { error: "Ficha não encontrada." };
+
+    // Qualquer um pega uma ficha para si (elementos de cenário passam de mão em mão); dar a outra pessoa
+    // é do dono ou do anfitrião.
+    if (message.type === "sheet:assign") {
+      const claiming = message.owner === player.name;
+      if (!claiming && !canEdit(character, player)) {
+        return { error: `Só ${character.owner} ou o anfitrião passam esta ficha para outra pessoa.` };
+      }
+      if (!claiming && message.owner !== room.hostName && !present.includes(message.owner)) {
+        return { error: `${message.owner} não está na mesa.` };
+      }
+      if (message.owner === character.owner) return { error: `${character.name} já é de ${message.owner}.` };
+      const from = character.owner;
+      character.owner = message.owner;
+      const text = claiming
+        ? `${player.name} pegou a ficha ${character.name}, de ${from}.`
+        : `${player.name} passou a ficha ${character.name}, de ${from}, para ${message.owner}.`;
+      return { character, entry: systemEntry(room, text) };
+    }
+
     if (!canEdit(character, player)) {
       return { error: `Só ${character.owner} ou o anfitrião mexem nesta ficha.` };
     }
@@ -154,6 +199,10 @@ function handleSheetMessage(
         character.name = message.name.trim().slice(0, 80) || character.name;
         return { character };
 
+      case "sheet:describe":
+        character.description = cleanDescription(message.description);
+        return { character };
+
       case "sheet:op": {
         const next = applySheetOp(template, character, message.op);
         Object.assign(character, next);
@@ -164,6 +213,7 @@ function handleSheetMessage(
         const roll = rollFromField(template, character, message.fieldId, rng, {
           trackId: message.trackId,
           extra: message.extra,
+          edge: message.edge,
         });
         const hidden = message.private === true;
         if (roll.kind === "ironsworn") room.lastRolls[character.id] = { roll, private: hidden };
@@ -186,12 +236,64 @@ function handleSheetMessage(
   }
 }
 
+function handleCompendiumMessage(
+  room: RoomRecord,
+  player: Player,
+  message: Extract<ClientMessage, { type: `compendium:${string}` }>,
+  rng: Rng,
+): MessageOutcome {
+  const compendium = findCompendium(message.compendiumId);
+  if (!compendium) return { error: "Compêndio desconhecido." };
+  const added = room.compendiums.includes(compendium.id);
+
+  switch (message.type) {
+    case "compendium:add":
+      if (added) return { error: `${compendium.name} já está na mesa.` };
+      room.compendiums.push(compendium.id);
+      return {
+        compendiums: room.compendiums,
+        entry: systemEntry(room, `${player.name} adicionou o compêndio ${compendium.name} à mesa.`),
+      };
+
+    case "compendium:remove":
+      if (player.role !== "host") return { error: "Só o anfitrião tira compêndios da mesa." };
+      if (!added) return { error: `${compendium.name} não está na mesa.` };
+      room.compendiums = room.compendiums.filter((id) => id !== compendium.id);
+      return {
+        compendiums: room.compendiums,
+        entry: systemEntry(room, `${player.name} tirou o compêndio ${compendium.name} da mesa.`),
+      };
+
+    case "compendium:get": {
+      if (!added) return { error: `Adicione ${compendium.name} à mesa primeiro.` };
+      const item = findCompendiumItem(compendium.id, message.itemId);
+      if (!item) return { error: "Item de compêndio desconhecido." };
+      return { reply: { type: "compendium:item", compendiumId: compendium.id, item } };
+    }
+
+    case "compendium:roll": {
+      if (!added) return { error: `Adicione ${compendium.name} à mesa primeiro.` };
+      const item = findCompendiumItem(compendium.id, message.itemId);
+      if (!item || item.kind !== "oracles") return { error: "Este item não tem oráculos." };
+      try {
+        const text = rollOracle(item, message.target, rng);
+        return rollOutcome(room, { author: player.name, kind: "roll", text }, message.private === true);
+      } catch (error) {
+        if (error instanceof OracleError) return { error: error.message };
+        throw error;
+      }
+    }
+  }
+}
+
 /** Aplica uma mensagem de um jogador à sala. A rolagem é resolvida aqui, nunca no cliente. */
 export function handleClientMessage(
   room: RoomRecord,
   player: Player,
   message: ClientMessage,
   rng: Rng = defaultRng,
+  /** Nomes de quem está na mesa agora; as fichas só passam para eles ou para o anfitrião. */
+  present: readonly string[] = [],
 ): MessageOutcome {
   if (message.type === "scene:op") {
     try {
@@ -204,12 +306,21 @@ export function handleClientMessage(
       throw error;
     }
   }
+  if (message.type.startsWith("compendium:")) {
+    return handleCompendiumMessage(
+      room,
+      player,
+      message as Extract<ClientMessage, { type: `compendium:${string}` }>,
+      rng,
+    );
+  }
   if (message.type.startsWith("sheet:")) {
     return handleSheetMessage(
       room,
       player,
       message as Extract<ClientMessage, { type: `sheet:${string}` }>,
       rng,
+      present,
     );
   }
   if (message.type === "safety:signal") {

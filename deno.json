@@ -2,7 +2,7 @@
   "tasks": {
     "dev": "deno run --watch=server,core --allow-env=PORT,HOST --allow-net --allow-read=. --allow-write=data server/main.ts",
     "start": "deno run --allow-env=PORT,HOST --allow-net --allow-read=. --allow-write=data server/main.ts",
-    "check": "deno check server/*.ts core/*.ts core/sheet/*.ts core/sheet/templates/*.ts",
+    "check": "deno check server/*.ts core/*.ts core/compendium/*.ts core/sheet/*.ts core/sheet/templates/*.ts",
     "test": "deno test --allow-net=127.0.0.1 --allow-read --allow-write core/ server/"
   },
   "compilerOptions": {

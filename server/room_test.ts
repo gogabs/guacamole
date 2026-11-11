@@ -12,6 +12,62 @@ import {
 
 const ana: Player = { id: "p1", name: "Ana", role: "player", connectedAt: "2026-01-01T00:00:00Z" };
 
+Deno.test("compêndios: qualquer um adiciona, só o anfitrião tira, e o conteúdo só vem se estiver na mesa", () => {
+  const room = createRoomRecord("ABC234", "Mesa", "Hugo", "open");
+  const early = handleClientMessage(room, ana, { type: "compendium:get", compendiumId: "ironsworn", itemId: "moves" });
+  assertEquals("error" in early, true);
+
+  const added = handleClientMessage(room, ana, { type: "compendium:add", compendiumId: "ironsworn" });
+  if ("error" in added) throw new Error(added.error);
+  assertEquals(added.compendiums, ["ironsworn"]);
+  assertEquals(added.entry?.text, "Ana adicionou o compêndio Ironsworn à mesa.");
+  assertEquals("error" in handleClientMessage(room, ana, { type: "compendium:add", compendiumId: "ironsworn" }), true);
+  assertEquals("error" in handleClientMessage(room, ana, { type: "compendium:add", compendiumId: "nada" }), true);
+
+  const item = handleClientMessage(room, ana, { type: "compendium:get", compendiumId: "ironsworn", itemId: "assets" });
+  if ("error" in item) throw new Error(item.error);
+  assertEquals(item.reply?.type, "compendium:item");
+
+  assertEquals("error" in handleClientMessage(room, ana, { type: "compendium:remove", compendiumId: "ironsworn" }), true);
+  const removed = handleClientMessage(room, host, { type: "compendium:remove", compendiumId: "ironsworn" });
+  if ("error" in removed) throw new Error(removed.error);
+  assertEquals(removed.compendiums, []);
+});
+
+Deno.test("compêndios: o oráculo rola no servidor, em público ou em privado", () => {
+  const room = createRoomRecord("ABC234", "Mesa", "Hugo", "open");
+  handleClientMessage(room, ana, { type: "compendium:add", compendiumId: "ironsworn" });
+  const target = { type: "table" as const, tableId: "moves.pay_the_price" };
+  const open = handleClientMessage(
+    room,
+    ana,
+    { type: "compendium:roll", compendiumId: "ironsworn", itemId: "oracles", target },
+    seq(face(50, 100)),
+  );
+  if (!("entry" in open)) throw new Error("esperava entrada");
+  assertEquals([open.entry!.kind, open.entry!.author], ["roll", "Ana"]);
+  assertEquals(open.entry!.text.includes("Pagar o Preço, d100 50"), true);
+
+  const historyBefore = room.history.length;
+  const secret = handleClientMessage(
+    room,
+    ana,
+    { type: "compendium:roll", compendiumId: "ironsworn", itemId: "oracles", target, private: true },
+    seq(face(50, 100)),
+  );
+  if (!("privateEntry" in secret)) throw new Error("esperava entrada privada");
+  assertEquals(secret.privateEntry?.private, true);
+  assertEquals(room.history.length, historyBefore);
+
+  const notOracle = handleClientMessage(
+    room,
+    ana,
+    { type: "compendium:roll", compendiumId: "ironsworn", itemId: "moves", target },
+    seq(0.5),
+  );
+  assertEquals("error" in notOracle, true);
+});
+
 Deno.test("texto vira entrada com autor e seq crescente", () => {
   const room = createRoomRecord("ABC234", "Mesa", "Ana", "open");
   const a = handleClientMessage(room, ana, { type: "chat:send", input: "oi" });
@@ -121,6 +177,79 @@ Deno.test("ficha: criar, editar e restringir a edição ao dono ou anfitrião", 
     op: { type: "field:set", fieldId: "iron.nao.existe", value: 1 },
   });
   assertEquals("error" in bad, true);
+});
+
+Deno.test("ficha: o dono ou o anfitrião passam a ficha para quem está na mesa", () => {
+  const room = SHEET_ROOM();
+  const sheet = createSheet(room, ana, "template.fate-core");
+  const present = ["Ana", "Bia"];
+  const assign = (player: Player, owner: string) =>
+    handleClientMessage(room, player, { type: "sheet:assign", characterId: sheet.id, owner }, undefined, present);
+
+  const passed = assign(ana, "Bia");
+  assertEquals("error" in passed, false);
+  assertEquals(room.characters[0].owner, "Bia");
+  assertEquals(room.history.at(-1)?.text, "Ana passou a ficha Kaja, de Ana, para Bia.");
+
+  assertEquals("error" in assign(ana, "Carlos"), true, "Ana já não é a dona, e Carlos não está na mesa");
+  assertEquals("error" in assign(bia, "Carlos"), true, "Carlos não está na mesa");
+  assertEquals("error" in assign(bia, "Bia"), true, "já é dela");
+  assertEquals("error" in assign(host, "Ana"), false, "o anfitrião devolve a qualquer um");
+  assertEquals(room.characters[0].owner, "Ana");
+
+  const claimed = assign(bia, "Bia");
+  assertEquals("error" in claimed, false, "qualquer um pega uma ficha para si");
+  assertEquals(room.history.at(-1)?.text, "Bia pegou a ficha Kaja, de Ana.");
+  assertEquals("error" in assign(ana, "Ana"), false, "Ana pega de volta");
+  assertEquals(room.characters[0].owner, "Ana");
+});
+
+Deno.test("ficha: descrição e importação de arquivo", () => {
+  const room = SHEET_ROOM();
+  const sheet = createSheet(room, ana, "template.fate-accelerated");
+  assertEquals(sheet.description, "");
+
+  const described = handleClientMessage(room, ana, {
+    type: "sheet:describe",
+    characterId: sheet.id,
+    description: "  Jovem clériga gnomo.  ",
+  });
+  assertEquals("error" in described, false);
+  assertEquals(room.characters[0].description, "Jovem clériga gnomo.");
+  assertEquals("error" in handleClientMessage(room, bia, {
+    type: "sheet:describe",
+    characterId: sheet.id,
+    description: "x",
+  }), true);
+
+  const file = {
+    id: "local-1",
+    templateId: "template.fate-accelerated",
+    name: "Kaju",
+    description: "Clériga",
+    // "quick" válido, "careful" fora do intervalo vira o máximo, "clever" inválido volta ao padrão.
+    values: { "fate.approach.quick": 3, "fate.approach.careful": 99, "fate.approach.clever": "x", "campo.inexistente": 1 },
+  };
+  const imported = handleClientMessage(room, bia, { type: "sheet:import", sheet: file });
+  if (!("character" in imported) || !imported.character) throw new Error("esperava ficha");
+  assertEquals([imported.character.id, imported.character.owner, imported.character.name], ["local-1", "Bia", "Kaju"]);
+  assertEquals(
+    [
+      imported.character.values["fate.approach.quick"],
+      imported.character.values["fate.approach.careful"],
+      imported.character.values["fate.approach.clever"],
+      "campo.inexistente" in imported.character.values,
+    ],
+    [3, 5, 0, false],
+  );
+
+  // Importar o mesmo arquivo de novo não repete o id.
+  const again = handleClientMessage(room, bia, { type: "sheet:import", sheet: file });
+  if (!("character" in again) || !again.character) throw new Error("esperava ficha");
+  assertEquals(again.character.id !== "local-1", true);
+
+  const unknown = handleClientMessage(room, bia, { type: "sheet:import", sheet: { ...file, templateId: "outro" } });
+  assertEquals("error" in unknown, true);
 });
 
 Deno.test("ficha: rolar de um campo vai para o histórico e queimar momentum reinicia o medidor", () => {

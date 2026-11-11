@@ -2,6 +2,7 @@ import {
   burnMomentum as burnRoll,
   type IronswornRoll,
   type Roll,
+  rollDungeonWorld,
   rollFate,
   rollIronsworn,
   rollProgress,
@@ -100,11 +101,25 @@ function markProgress(progress: ProgressValue, times: number): ProgressValue {
 export interface FieldRollOptions {
   /** Bônus ou penalidade pontual somados ao valor do campo. */
   extra?: number;
+  /** Vantagens (positivo) ou desvantagens (negativo) pedidas por quem rola, além das condições da ficha. */
+  edge?: number;
   /** Obrigatório em campos `tracks`. */
   trackId?: string;
 }
 
-/** Rola a partir de um campo da ficha: perícia Fate, atributo Ironsworn ou trilha de progresso. */
+/** Os nomes das condições ativas entre os campos dados: caixa marcada, ou opção que não é a primeira. */
+function penalties(template: SheetTemplate, sheet: CharacterSheet, ids: string[]): string[] {
+  const names: string[] = [];
+  for (const id of ids) {
+    const field = findField(template, id);
+    const value = sheet.values[id];
+    const active = field.type === "checkbox" ? value === true : field.type === "select" && value !== field.options[0];
+    if (active) names.push(field.label);
+  }
+  return names;
+}
+
+/** Rola a partir de um campo da ficha: perícia Fate, atributo Ironsworn/Dungeon World ou trilha de progresso. */
 export function rollFromField(
   template: SheetTemplate,
   sheet: CharacterSheet,
@@ -117,6 +132,11 @@ export function rollFromField(
 
   if (field.type === "number" && field.roll) {
     const modifier = (sheet.values[field.id] as number) + extra;
+    if (field.roll === "dungeon-world") {
+      const reasons = penalties(template, sheet, field.disadvantageIf ?? []);
+      const asked = clamp(Math.round(options.edge ?? 0), -3, 3);
+      return rollDungeonWorld(modifier, rng, field.label, asked - reasons.length, reasons);
+    }
     return field.roll === "fate"
       ? rollFate(modifier, rng, field.label)
       : rollIronsworn(modifier, rng, field.label);
