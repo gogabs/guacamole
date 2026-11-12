@@ -112,6 +112,8 @@ export type MessageOutcome =
     character?: RoomCharacter;
     removed?: string;
     scene?: SceneState;
+    /** Id do card de áudio (efeito) que o anfitrião disparou. */
+    fired?: string;
     /** Lista nova de compêndios da mesa, para todos. */
     compendiums?: string[];
     /** Resposta só para quem pediu. */
@@ -305,11 +307,16 @@ export function handleClientMessage(
         room.scene,
         message.op,
         player.role === "host",
-        (id) => room.media.some((m) => m.id === id && m.kind === "image"),
+        (id, kind) => room.media.some((m) => m.id === id && m.kind === kind),
       );
       room.scene = result.state;
       const text = result.message(player.name);
-      return { scene: room.scene, entry: text ? systemEntry(room, text) : undefined };
+      return {
+        // Um efeito disparado não muda a cena: só avisa quem está ouvindo.
+        scene: result.fired ? undefined : room.scene,
+        fired: result.fired,
+        entry: text ? systemEntry(room, text) : undefined,
+      };
     } catch (error) {
       if (error instanceof SceneError) return { error: error.message };
       throw error;

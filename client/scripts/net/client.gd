@@ -1,4 +1,4 @@
-extends Node
+﻿extends Node
 ## Cliente do servidor Guacamole: HTTP para criar/entrar em mesas e WebSocket para o jogo.
 ## Não conhece interface nem som; só emite sinais com os dicionários do protocolo.
 
@@ -12,6 +12,7 @@ signal scene_changed(scene: Dictionary)
 signal compendiums_changed(ids: Array)
 signal compendium_item_received(compendium_id: String, item: Dictionary)
 signal media_ready(media_id: String)
+signal audio_fired(card_id: String)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -33,6 +34,8 @@ var _items: Dictionary = {}  # "compêndio/item" -> conteúdo já recebido
 var _token := ""
 var _textures: Dictionary = {}  # id da mídia -> Texture2D já baixada
 var _downloading: Dictionary = {}
+var _streams: Dictionary = {}  # id da mídia -> AudioStream já baixado
+var _clock_skew_ms := 0.0
 var _ws := WebSocketPeer.new()
 var _active := false
 var _opened := false
@@ -224,10 +227,29 @@ func media_texture(media_id: String) -> Texture2D:
 		return null
 	if _textures.has(media_id):
 		return _textures[media_id]
+	_fetch_media(media_id)
+	return null
+
+
+## O áudio da mesa com esse id, se já foi baixado; senão começa a baixar e devolve null.
+func media_stream(media_id: String) -> AudioStream:
+	if media_id.is_empty():
+		return null
+	if _streams.has(media_id):
+		return _streams[media_id]
+	_fetch_media(media_id)
+	return null
+
+
+## O relógio do servidor, em milissegundos, estimado a partir do `serverTime` do welcome.
+func server_ms() -> float:
+	return Time.get_unix_time_from_system() * 1000.0 + _clock_skew_ms
+
+
+func _fetch_media(media_id: String) -> void:
 	if not _downloading.has(media_id):
 		_downloading[media_id] = true
 		_download_media(media_id)
-	return null
 
 
 func _download_media(media_id: String) -> void:
@@ -243,21 +265,41 @@ func _download_media(media_id: String) -> void:
 	_downloading.erase(media_id)
 	if result[0] != HTTPRequest.RESULT_SUCCESS or int(result[1]) != 200:
 		return
-	var image := Image.new()
 	var bytes: PackedByteArray = result[3]
-	var error := image.load_png_from_buffer(bytes)
-	if error != OK:
-		error = image.load_jpg_from_buffer(bytes)
-	if error != OK:
-		error = image.load_webp_from_buffer(bytes)
-	if error != OK:
-		return
-	_textures[media_id] = ImageTexture.create_from_image(image)
+	var stream := _decode_audio(bytes)
+	if stream != null:
+		_streams[media_id] = stream
+	else:
+		var image := Image.new()
+		var error := image.load_png_from_buffer(bytes)
+		if error != OK:
+			error = image.load_jpg_from_buffer(bytes)
+		if error != OK:
+			error = image.load_webp_from_buffer(bytes)
+		if error != OK:
+			return
+		_textures[media_id] = ImageTexture.create_from_image(image)
 	media_ready.emit(media_id)
 
 
+## OGG, MP3 ou WAV pelos primeiros bytes; null se não for áudio.
+func _decode_audio(bytes: PackedByteArray) -> AudioStream:
+	if bytes.size() < 12:
+		return null
+	var head := bytes.slice(0, 4).get_string_from_ascii()
+	if head == "OggS":
+		return AudioStreamOggVorbis.load_from_buffer(bytes)
+	if head == "RIFF" and bytes.slice(8, 12).get_string_from_ascii() == "WAVE":
+		return AudioStreamWAV.load_from_buffer(bytes)
+	if head.begins_with("ID3") or (bytes[0] == 0xFF and (bytes[1] & 0xE0) == 0xE0):
+		var mp3 := AudioStreamMP3.new()
+		mp3.data = bytes
+		return mp3
+	return null
+
 func leave() -> void:
 	_textures = {}
+	_streams = {}
 	_downloading = {}
 	_token = ""
 	if _active:
@@ -308,6 +350,8 @@ func _handle(raw: String) -> void:
 			players = message["players"]
 			templates = message.get("templates", [])
 			scene = message.get("scene", {})
+			if message.has("serverTime"):
+				_clock_skew_ms = float(message["serverTime"]) - Time.get_unix_time_from_system() * 1000.0
 			catalog = message.get("catalog", [])
 			compendiums = message.get("compendiums", [])
 			_items = {}
@@ -327,6 +371,8 @@ func _handle(raw: String) -> void:
 		"scene:sync":
 			scene = message["scene"]
 			scene_changed.emit(scene)
+		"audio:fire":
+			audio_fired.emit(str(message["cardId"]))
 		"compendium:sync":
 			compendiums = message["compendiums"]
 			compendiums_changed.emit(compendiums)

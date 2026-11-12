@@ -207,6 +207,8 @@ func _run() -> void:
 	await _key(KEY_TAB, KEY_TAB)
 	_check(root.gui_get_focus_owner() == table._scene._zone, "Tab vai da ficha à cena, sem passar por histórico, campo ou barras")
 	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == table._audio._zone, "depois vem o áudio")
+	await _key(KEY_TAB, KEY_TAB)
 	_check(root.gui_get_focus_owner() == table._compendiums._zone, "depois vêm os compêndios")
 	await _key(KEY_TAB, KEY_TAB)
 	_check(root.gui_get_focus_owner() == sheets._zone, "e volta para a ficha")
@@ -416,13 +418,58 @@ func _run() -> void:
 	_check(await _wait(func() -> bool: return table._client.media_texture(str(uploaded["id"])) != null), "Caio baixa a imagem do fundo")
 	DirAccess.remove_absolute(png_path)
 
+	# Áudio: o anfitrião liga sons; Caio os ouve, posicionais quando estão numa zona.
+	var wav_path := ProjectSettings.globalize_path("user://test_som.wav")
+	var wav := PackedByteArray()
+	var samples := 4000
+	wav.append_array("RIFF".to_ascii_buffer())
+	wav.append_array(_u32(36 + samples * 2))
+	wav.append_array("WAVEfmt ".to_ascii_buffer())
+	wav.append_array(_u32(16))
+	wav.append_array(PackedByteArray([1, 0, 1, 0]))
+	wav.append_array(_u32(8000))
+	wav.append_array(_u32(16000))
+	wav.append_array(PackedByteArray([2, 0, 16, 0]))
+	wav.append_array("data".to_ascii_buffer())
+	wav.append_array(_u32(samples * 2))
+	wav.resize(44 + samples * 2)
+	var wav_file := FileAccess.open(wav_path, FileAccess.WRITE)
+	wav_file.store_buffer(wav)
+	wav_file.close()
+	var sound: Dictionary = await ana.upload_media(wav_path)
+	_check(sound["ok"], "Ana envia um áudio ao servidor")
+	ana.scene_op({"type": "card:add", "id": "fogo", "title": "Fogueira", "text": "", "kind": "audio", "mediaId": sound["id"], "mode": "ambient", "zoneId": "z1"})
+	ana.scene_op({"type": "card:add", "id": "trovao", "title": "Trovão", "text": "", "kind": "audio", "mediaId": sound["id"], "mode": "effect"})
+	var audio_panel: Control = table._audio
+	var engine: Node = table._audio_engine
+	_check(await _wait(func() -> bool: return audio_panel._rows.filter(func(r: Dictionary) -> bool: return r["kind"] == "audio").size() == 2), "Caio vê os dois sons na região de Áudio")
+	_check(audio_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["master", "position", "header", "audio", "header", "audio"], "a lista tem volume, posição e seções de ambiência e efeito")
+	_check(audio_panel._row_text(audio_panel._rows[3]).contains("Fogueira, ambiência, parado") and audio_panel._row_text(audio_panel._rows[3]).contains("na zona Altar"), "o som fala modo, estado e zona")
+	ana.scene_op({"type": "audio:play", "cardId": "fogo"})
+	_check(await _wait(func() -> bool: return engine.has_voice("fogo")), "Caio baixa o som e ele começa a tocar")
+	_check(engine.is_positional("fogo"), "o som numa zona é posicional")
+	audio_panel._zone.grab_focus()
+	audio_panel._cursor = 0
+	await _key(KEY_LEFT, KEY_LEFT)
+	_check(is_equal_approx(engine.master, 0.9), "Esquerda no volume geral baixa só o de Caio")
+	audio_panel._cursor = 3
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(engine.has_voice("fogo"), "quem não é anfitrião não para o som")
+	ana.scene_op({"type": "audio:stop", "cardId": "fogo"})
+	_check(await _wait(func() -> bool: return not engine.has_voice("fogo")), "parar o som o silencia para Caio")
+	ana.scene_op({"type": "audio:play", "cardId": "trovao"})
+	await _key(KEY_1, KEY_1)
+	scene_panel._zone.grab_focus()
+	DirAccess.remove_absolute(wav_path)
+
 	ana.scene_op({"type": "scene:editors", "editors": "host"})
 	_check(await _wait(func() -> bool: return table._client.scene["editors"] == "host"), "Ana restringe a edição dos cards")
-	_check(await _wait(func() -> bool: return scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["info", "header", "zone", "card"]), "Caio deixa de ver Adicionar card")
+	_check(await _wait(func() -> bool: return not scene_panel._rows.any(func(r: Dictionary) -> bool: return r["kind"] == "new_card")), "Caio deixa de ver Adicionar card")
 	sheets._zone.grab_focus()
 
 	# Compêndios: terceira região, adicionar, abrir itens, rolar oráculos e escolher ativos.
 	var comp: Control = table._compendiums
+	await _key(KEY_TAB, KEY_TAB)
 	await _key(KEY_TAB, KEY_TAB)
 	await _key(KEY_TAB, KEY_TAB)
 	_check(root.gui_get_focus_owner() == comp._zone, "Tab chega à região de compêndios")
@@ -670,3 +717,10 @@ func _run() -> void:
 	print("---")
 	print("Falhas: ", failures)
 	quit(1 if failures > 0 else 0)
+
+
+func _u32(value: int) -> PackedByteArray:
+	var bytes := PackedByteArray()
+	bytes.resize(4)
+	bytes.encode_u32(0, value)
+	return bytes

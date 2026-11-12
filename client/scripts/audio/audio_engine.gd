@@ -1,0 +1,208 @@
+extends Node
+## Toca o áudio da cena ativa: ambiência e música que o anfitrião ligou, e os efeitos que ele
+## dispara. Ambiência numa zona é posicional: cada célula vale CELL pixels, e quem ouve fica no
+## centro da sua zona ("Minha posição") ou no centro do grid. Tudo o mais é o estado do servidor:
+## o card diz se toca e desde quando (no relógio do servidor), e quem entra depois cai no ponto certo.
+
+const CELL := 100.0
+
+## Volume geral só de quem ouve, de 0 a 1.
+var master := 1.0
+## Zona (local) de onde esta pessoa ouve; vazio é o centro do grid.
+var listener_zone := ""
+
+var _client: Node
+var _listener: AudioListener2D
+var _voices: Dictionary = {}  # id do card -> {player, started, positional, zone}
+
+
+func setup(client: Node) -> void:
+	_client = client
+
+
+func _ready() -> void:
+	_listener = AudioListener2D.new()
+	add_child(_listener)
+	_listener.make_current()
+	_client.scene_changed.connect(func(_scene: Dictionary) -> void: sync())
+	_client.media_ready.connect(func(_id: String) -> void: sync())
+	_client.audio_fired.connect(_fire)
+
+
+func _exit_tree() -> void:
+	for id in _voices.keys():
+		_drop(str(id))
+
+
+func has_voice(card_id: String) -> bool:
+	return _voices.has(card_id)
+
+
+func is_positional(card_id: String) -> bool:
+	return _voices.has(card_id) and _voices[card_id]["positional"]
+
+
+func set_master(value: float) -> void:
+	master = clampf(value, 0.0, 1.0)
+	sync()
+
+
+func set_listener_zone(zone_id: String) -> void:
+	listener_zone = zone_id
+	sync()
+
+
+# --- Cena -----------------------------------------------------------------------------------------
+
+func _active() -> Dictionary:
+	for scene in _client.scene.get("scenes", []):
+		if scene["id"] == _client.scene.get("activeId"):
+			return scene
+	return {}
+
+
+func _card(card_id: String) -> Dictionary:
+	for card in _active().get("cards", []):
+		if card["id"] == card_id:
+			return card
+	return {}
+
+
+func _zone_position(scene: Dictionary, zone_id: Variant) -> Variant:
+	for zone in scene.get("zones", []):
+		if zone["id"] == zone_id and not (zone["cells"] as Array).is_empty():
+			var sum := Vector2.ZERO
+			for cell in zone["cells"]:
+				sum += Vector2((float(cell["x"]) + 0.5) * CELL, (float(cell["y"]) + 0.5) * CELL)
+			return sum / float((zone["cells"] as Array).size())
+	return null
+
+
+func _grid_center(scene: Dictionary) -> Vector2:
+	var grid: Dictionary = scene.get("grid", {"cols": 8, "rows": 6})
+	return Vector2(float(grid["cols"]), float(grid["rows"])) * CELL / 2.0
+
+
+func _listener_position(scene: Dictionary) -> Vector2:
+	var at: Variant = _zone_position(scene, listener_zone) if not listener_zone.is_empty() else null
+	return at if at != null else _grid_center(scene)
+
+
+## Põe as vozes em dia com a cena: liga o que deve tocar, desliga o resto e ajusta volume e posição.
+func sync() -> void:
+	var scene := _active()
+	var wanted: Dictionary = {}
+	for card in scene.get("cards", []):
+		var audio: Variant = card.get("audio")
+		if audio is Dictionary and audio["playing"] and audio["mode"] != "effect":
+			wanted[str(card["id"])] = card
+	for id in _voices.keys():
+		if not wanted.has(id):
+			_drop(str(id))
+	if scene.is_empty():
+		return
+	_listener.position = _listener_position(scene)
+	for id in wanted:
+		_ensure(scene, wanted[id])
+
+
+func _ensure(scene: Dictionary, card: Dictionary) -> void:
+	var audio: Dictionary = card["audio"]
+	var id := str(card["id"])
+	var position: Variant = _zone_position(scene, card.get("zoneId"))
+	var positional: bool = position != null
+	var voice: Variant = _voices.get(id)
+	if voice != null and (voice["started"] != audio["startedAt"] or voice["positional"] != positional):
+		_drop(id)
+		voice = null
+	if voice == null:
+		var stream: AudioStream = _client.media_stream(str(card.get("mediaId")))
+		if stream == null:
+			return  # ainda baixando; media_ready chama sync de novo
+		voice = _start(scene, card, stream, positional)
+		if voice == null:
+			return
+		_voices[id] = voice
+	var player: Node = voice["player"]
+	player.volume_db = _db(audio)
+	if positional:
+		(player as AudioStreamPlayer2D).position = position
+
+
+func _start(scene: Dictionary, card: Dictionary, source: AudioStream, positional: bool) -> Variant:
+	var audio: Dictionary = card["audio"]
+	var stream := source.duplicate() as AudioStream
+	_set_loop(stream, audio["loop"])
+	var offset := 0.0
+	if audio["startedAt"] != null:
+		offset = maxf(0.0, (_client.server_ms() - float(audio["startedAt"])) / 1000.0)
+	var length := stream.get_length()
+	if length > 0.0:
+		if audio["loop"]:
+			offset = fposmod(offset, length)
+		elif offset >= length:
+			offset = -1.0
+	var player: Node
+	if positional:
+		var spatial := AudioStreamPlayer2D.new()
+		spatial.max_distance = _grid_center(scene).length() * 2.4
+		player = spatial
+	else:
+		player = AudioStreamPlayer.new()
+	player.stream = stream
+	add_child(player)
+	if offset >= 0.0:
+		player.call("play", offset)
+	return {"player": player, "started": audio["startedAt"], "positional": positional}
+
+
+func _drop(card_id: String) -> void:
+	var voice: Variant = _voices.get(card_id)
+	_voices.erase(card_id)
+	if voice != null and is_instance_valid(voice["player"]):
+		(voice["player"] as Node).queue_free()
+
+
+func _db(audio: Dictionary) -> float:
+	return linear_to_db(maxf(0.0001, float(audio["volume"]) / 100.0 * master))
+
+
+func _set_loop(stream: AudioStream, on: bool) -> void:
+	if stream is AudioStreamOggVorbis:
+		stream.loop = on
+	elif stream is AudioStreamMP3:
+		stream.loop = on
+	elif stream is AudioStreamWAV:
+		stream.loop_mode = AudioStreamWAV.LOOP_FORWARD if on else AudioStreamWAV.LOOP_DISABLED
+		if on:
+			stream.loop_begin = 0
+			stream.loop_end = int(stream.get_length() * stream.mix_rate)
+
+
+# --- Efeitos -----------------------------------------------------------------------------------
+
+func _fire(card_id: String) -> void:
+	var card := _card(card_id)
+	var audio: Variant = card.get("audio")
+	if not audio is Dictionary:
+		return
+	var stream: AudioStream = _client.media_stream(str(card.get("mediaId")))
+	if stream == null:
+		return
+	var scene := _active()
+	var position: Variant = _zone_position(scene, card.get("zoneId"))
+	var player: Node
+	if position != null:
+		var spatial := AudioStreamPlayer2D.new()
+		spatial.max_distance = _grid_center(scene).length() * 2.4
+		spatial.position = position
+		player = spatial
+	else:
+		player = AudioStreamPlayer.new()
+	var one_shot := stream.duplicate() as AudioStream
+	_set_loop(one_shot, false)
+	player.stream = one_shot
+	player.set("volume_db", _db(audio))
+	add_child(player)
+	player.finished.connect(player.queue_free)
+	player.call("play")

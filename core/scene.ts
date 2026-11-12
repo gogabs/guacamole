@@ -4,8 +4,25 @@
  * Uma cena fica ativa por vez na mesa.
  */
 
-export type CardKind = "note" | "image" | "clock";
-export const CARD_KINDS: CardKind[] = ["note", "image", "clock"];
+export type CardKind = "note" | "image" | "clock" | "audio";
+export const CARD_KINDS: CardKind[] = ["note", "image", "clock", "audio"];
+
+/** Ambiência (loop, posicional se estiver numa zona), música (uma por vez) ou efeito (dispara e acaba). */
+export type AudioMode = "ambient" | "music" | "effect";
+export const AUDIO_MODES: AudioMode[] = ["ambient", "music", "effect"];
+
+export interface AudioSpec {
+  mode: AudioMode;
+  /** De 0 a 100. */
+  volume: number;
+  loop: boolean;
+  /** Efeitos nunca ficam tocando: só são disparados. */
+  playing: boolean;
+  /** Relógio do servidor (ms) de quando começou, para quem entra depois cair no ponto certo. */
+  startedAt: number | null;
+  /** Tecla de 1 a 9 do soundboard. */
+  slot: number | null;
+}
 
 export interface SceneCard {
   id: string;
@@ -15,8 +32,10 @@ export interface SceneCard {
   /** Oculto: só o anfitrião vê; o servidor não envia o card aos jogadores. */
   hidden: boolean;
   kind: CardKind;
-  /** Imagem guardada no servidor (id da mídia). */
+  /** Imagem ou áudio guardado no servidor (id da mídia). */
   mediaId: string | null;
+  /** Só em cards de áudio. */
+  audio: AudioSpec | null;
   /** Só em relógios: segmentos totais e preenchidos. */
   clock: { segments: number; filled: number } | null;
   /** Zona onde o card está; `null` é a coluna de cards soltos. */
@@ -83,6 +102,7 @@ export type SceneOp =
     kind?: CardKind;
     mediaId?: string | null;
     segments?: number;
+    mode?: AudioMode;
     zoneId?: string | null;
   }
   /** `mediaId` e `segments` ausentes mantêm o que o card já tem. */
@@ -91,6 +111,11 @@ export type SceneOp =
   /** Põe o card numa zona (token) ou o solta na coluna (`zoneId: null`). */
   | { type: "card:place"; cardId: string; zoneId: string | null }
   | { type: "card:clock"; cardId: string; filled: number }
+  /** Só o anfitrião controla o áudio. Efeitos disparam sem mudar o estado. */
+  | { type: "audio:play"; cardId: string }
+  | { type: "audio:stop"; cardId: string }
+  | { type: "audio:stopall" }
+  | { type: "audio:set"; cardId: string; volume?: number; loop?: boolean; mode?: AudioMode; slot?: number | null }
   /** Só o anfitrião. Revelar um card oculto é anunciado; ocultar não. */
   | { type: "card:visibility"; cardId: string; hidden: boolean }
   /** `direction` -1 sobe, 1 desce, dentro da cena ativa. */
@@ -113,6 +138,10 @@ export const SCENE_OP_TYPES = [
   "card:remove",
   "card:place",
   "card:clock",
+  "audio:play",
+  "audio:stop",
+  "audio:stopall",
+  "audio:set",
   "card:visibility",
   "card:move",
 ];
@@ -143,6 +172,8 @@ export interface SceneResult {
   state: SceneState;
   /** Frase para o histórico da mesa; `who` é quem agiu. */
   message: (who: string) => string;
+  /** Um efeito foi disparado: o servidor avisa todos, sem guardar nada. */
+  fired?: string;
 }
 
 /** Aplica uma operação. Lança SceneError se não for permitida ou for inválida. */
@@ -151,7 +182,9 @@ export function applySceneOp(
   op: SceneOp,
   isHost: boolean,
   /** Diz se uma mídia existe na mesa; o servidor passa a sua lista. */
-  hasMedia: (id: string) => boolean = () => true,
+  hasMedia: (id: string, kind: "image" | "audio") => boolean = () => true,
+  /** Relógio do servidor em ms; vira o `startedAt` de quem começa a tocar. */
+  now: number = Date.now(),
 ): SceneResult {
   const hostOnly = () => {
     if (!isHost) throw new SceneError("Só o anfitrião faz isso.");
@@ -168,11 +201,20 @@ export function applySceneOp(
     scenes: state.scenes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
   });
   const withActive = (cards: SceneCard[]): SceneState => patchScene(active.id, { cards });
-  const media = (id: unknown): string | null => {
+  const media = (id: unknown, kind: "image" | "audio" = "image"): string | null => {
     if (id === null || id === undefined) return null;
-    if (typeof id !== "string" || !hasMedia(id)) throw new SceneError("Imagem não encontrada na mesa.");
+    if (typeof id !== "string" || !hasMedia(id, kind)) {
+      throw new SceneError(kind === "image" ? "Imagem não encontrada na mesa." : "Áudio não encontrado na mesa.");
+    }
     return id;
   };
+  const audioCard = (id: string): SceneCard & { audio: AudioSpec } => {
+    const card = cardById(id);
+    if (!card.audio) throw new SceneError("Esse card não é um áudio.");
+    return card as SceneCard & { audio: AudioSpec };
+  };
+  const patchAudio = (id: string, patch: Partial<AudioSpec>): SceneState =>
+    withActive(active.cards.map((c) => (c.id === id && c.audio ? { ...c, audio: { ...c.audio, ...patch } } : c)));
   const zoneById = (id: string): Zone => {
     const zone = active.zones.find((z) => z.id === id);
     if (!zone) throw new SceneError("Zona não encontrada.");
@@ -196,8 +238,9 @@ export function applySceneOp(
       if (state.scenes.length >= MAX_SCENES) throw new SceneError(`Limite de ${MAX_SCENES} cenas.`);
       if (state.scenes.some((s) => s.id === op.id)) throw new SceneError("Já existe uma cena com esse id.");
       const name = cleanName(op.name);
+      const leaving = patchScene(active.id, { cards: active.cards.map(stopped) });
       return {
-        state: { ...state, scenes: [...state.scenes, newScene(op.id, name)], activeId: op.id },
+        state: { ...leaving, scenes: [...leaving.scenes, newScene(op.id, name)], activeId: op.id },
         message: (who) => `${who} criou a cena ${name}.`,
       };
     }
@@ -213,7 +256,9 @@ export function applySceneOp(
     case "scene:activate": {
       hostOnly();
       const scene = sceneById(op.sceneId);
-      return { state: { ...state, activeId: scene.id }, message: () => `A cena agora é ${scene.name}.` };
+      // O som da cena que sai para: só a ativa toca.
+      const leaving = patchScene(active.id, { cards: active.cards.map(stopped) });
+      return { state: { ...leaving, activeId: scene.id }, message: () => `A cena agora é ${scene.name}.` };
     }
     case "scene:delete": {
       hostOnly();
@@ -305,14 +350,21 @@ export function applySceneOp(
       if (active.cards.some((c) => c.id === op.id)) throw new SceneError("Já existe um card com esse id.");
       const kind = op.kind ?? "note";
       if (!CARD_KINDS.includes(kind)) throw new SceneError("Tipo de card inválido.");
-      const card = {
+      if (kind === "audio") hostOnly();
+      const mode = op.mode ?? "ambient";
+      if (!AUDIO_MODES.includes(mode)) throw new SceneError("Modo de áudio inválido.");
+      const card: SceneCard = {
         ...cleanCard(op.id, op.title, op.text),
         kind,
-        mediaId: kind === "image" ? media(op.mediaId) : null,
+        mediaId: kind === "image" || kind === "audio" ? media(op.mediaId, kind) : null,
+        audio: kind === "audio"
+          ? { mode, volume: 80, loop: mode !== "effect", playing: false, startedAt: null, slot: null }
+          : null,
         clock: kind === "clock" ? { segments: clampInt(op.segments ?? 6, 2, MAX_SEGMENTS), filled: 0 } : null,
         zoneId: zoneIdOrNull(op.zoneId),
       };
       if (kind === "image" && !card.mediaId) throw new SceneError("Escolha a imagem do card.");
+      if (kind === "audio" && !card.mediaId) throw new SceneError("Escolha o arquivo de áudio.");
       return {
         state: withActive([...active.cards, card]),
         message: (who) => `${who} adicionou o card ${card.title}.`,
@@ -321,11 +373,8 @@ export function applySceneOp(
     case "card:edit": {
       cardEdit();
       const old = cardById(op.cardId);
-      const card: SceneCard = {
-        ...old,
-        ...cleanCard(old.id, op.title, op.text),
-        hidden: old.hidden,
-      };
+      const { title, text } = cleanCard(old.id, op.title, op.text);
+      const card: SceneCard = { ...old, title, text };
       if (old.kind === "image" && op.mediaId !== undefined) card.mediaId = media(op.mediaId) ?? old.mediaId;
       if (old.clock && op.segments !== undefined) {
         const segments = clampInt(op.segments, 2, MAX_SEGMENTS);
@@ -345,6 +394,59 @@ export function applySceneOp(
         state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, zoneId } : c))),
         message: (who) =>
           card.hidden ? "" : zone ? `${who} pôs ${card.title} na zona ${zone.name}.` : `${who} soltou ${card.title} da zona.`,
+      };
+    }
+    case "audio:play": {
+      hostOnly();
+      const card = audioCard(op.cardId);
+      if (card.audio.mode === "effect") return { state, message: () => "", fired: card.id };
+      // Só uma música por vez: a nova toma o lugar da que tocava.
+      const cards = active.cards.map((c) => {
+        if (c.id === card.id) return { ...c, audio: { ...card.audio, playing: true, startedAt: now } };
+        if (card.audio.mode === "music" && c.audio?.mode === "music" && c.audio.playing) {
+          return { ...c, audio: { ...c.audio, playing: false, startedAt: null } };
+        }
+        return c;
+      });
+      return { state: withActive(cards), message: () => "" };
+    }
+    case "audio:stop": {
+      hostOnly();
+      const card = audioCard(op.cardId);
+      return { state: patchAudio(card.id, { playing: false, startedAt: null }), message: () => "" };
+    }
+    case "audio:stopall": {
+      hostOnly();
+      return { state: withActive(active.cards.map(stopped)), message: () => "" };
+    }
+    case "audio:set": {
+      hostOnly();
+      const card = audioCard(op.cardId);
+      const patch: Partial<AudioSpec> = {};
+      if (op.volume !== undefined) patch.volume = clampInt(op.volume, 0, 100);
+      if (op.loop !== undefined) patch.loop = op.loop === true;
+      if (op.mode !== undefined) {
+        if (!AUDIO_MODES.includes(op.mode)) throw new SceneError("Modo de áudio inválido.");
+        patch.mode = op.mode;
+        // Mudar de modo reinicia: um efeito não fica tocando, e uma música nova pede para ser tocada.
+        patch.playing = false;
+        patch.startedAt = null;
+        patch.loop = op.loop === undefined ? op.mode !== "effect" : op.loop === true;
+      }
+      let cards = active.cards;
+      if (op.slot !== undefined) {
+        if (op.slot !== null && (!Number.isInteger(op.slot) || op.slot < 1 || op.slot > 9)) {
+          throw new SceneError("A tecla do soundboard vai de 1 a 9.");
+        }
+        patch.slot = op.slot;
+        // A tecla pertence a um card só: quem a tinha perde.
+        if (op.slot !== null) {
+          cards = cards.map((c) => (c.audio && c.audio.slot === op.slot && c.id !== card.id ? { ...c, audio: { ...c.audio, slot: null } } : c));
+        }
+      }
+      return {
+        state: patchScene(active.id, { cards: cards.map((c) => (c.id === card.id ? { ...c, audio: { ...card.audio, ...patch } } : c)) }),
+        message: () => "",
       };
     }
     case "card:clock": {
@@ -398,6 +500,26 @@ function cleanName(raw: string): string {
   return (typeof raw === "string" ? raw : "").trim().slice(0, MAX_NAME) || "Cena sem nome";
 }
 
+/** O estado lido de disco: nada continua tocando depois de um reinício do servidor. */
+function cleanAudio(raw: unknown): AudioSpec {
+  const a = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const mode = AUDIO_MODES.includes(a.mode as AudioMode) ? a.mode as AudioMode : "ambient";
+  const slot = Number.isInteger(a.slot) && (a.slot as number) >= 1 && (a.slot as number) <= 9 ? a.slot as number : null;
+  return {
+    mode,
+    volume: clampInt(a.volume ?? 80, 0, 100),
+    loop: typeof a.loop === "boolean" ? a.loop : mode !== "effect",
+    playing: false,
+    startedAt: null,
+    slot,
+  };
+}
+
+/** O card sem som tocando; cards que não são áudio ficam como estão. */
+function stopped(card: SceneCard): SceneCard {
+  return card.audio?.playing ? { ...card, audio: { ...card.audio, playing: false, startedAt: null } } : card;
+}
+
 function cleanText(raw: unknown): string {
   return (typeof raw === "string" ? raw : "").trim().slice(0, MAX_TEXT);
 }
@@ -419,6 +541,7 @@ function cleanCard(id: string, title: unknown, text: unknown): SceneCard {
     hidden: false,
     kind: "note",
     mediaId: null,
+    audio: null,
     clock: null,
     zoneId: null,
   };
@@ -500,7 +623,8 @@ export function normalizeSceneState(value: unknown): SceneState {
         text: typeof card.text === "string" ? card.text : "",
         hidden: card.hidden === true,
         kind,
-        mediaId: kind === "image" && typeof card.mediaId === "string" ? card.mediaId : null,
+        mediaId: (kind === "image" || kind === "audio") && typeof card.mediaId === "string" ? card.mediaId : null,
+        audio: kind === "audio" ? cleanAudio(card.audio) : null,
         clock: kind === "clock" ? { segments, filled: clampInt(clock?.filled ?? 0, 0, segments) } : null,
         zoneId: scene.zones.some((z) => z.id === card.zoneId) ? card.zoneId as string : null,
       });

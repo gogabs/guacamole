@@ -114,6 +114,8 @@ export type ServerMessage =
     templates: SheetTemplate[];
     characters: RoomCharacter[];
     scene: SceneState;
+    /** Relógio do servidor (ms): o cliente sabe quanto o seu difere, para tocar no ponto certo. */
+    serverTime: number;
     /** Compêndios disponíveis no servidor, sem conteúdo. */
     catalog: CompendiumSummary[];
     /** Ids dos compêndios adicionados a esta mesa, na ordem em que entraram. */
@@ -125,6 +127,8 @@ export type ServerMessage =
   | { type: "sheet:sync"; character: RoomCharacter }
   | { type: "sheet:removed"; characterId: string }
   | { type: "scene:sync"; scene: SceneState }
+  /** Um efeito do soundboard foi disparado; `serverTime` ajuda a calcular o atraso. */
+  | { type: "audio:fire"; cardId: string; serverTime: number }
   | { type: "presence:sync"; players: Player[] }
   | { type: "room:sync"; room: RoomSummary }
   | { type: "error"; message: string };

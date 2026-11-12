@@ -156,3 +156,51 @@ Deno.test("cena: fundo e descrição são do anfitrião; estado antigo é comple
   assertEquals(old.scenes[0].grid, { cols: 8, rows: 6 });
   assertEquals([old.scenes[0].zones, old.scenes[0].cards[0].kind, old.scenes[0].cards[0].zoneId], [[], "note", null]);
 });
+
+Deno.test("cena: áudio toca, para, dispara efeitos e só uma música por vez", () => {
+  const known = (id: string, kind: string) => id === "wav" ? kind === "audio" : id === "png" && kind === "image";
+  let state = createSceneState();
+  const add = (id: string, mode: "ambient" | "music" | "effect") =>
+    applySceneOp(state, { type: "card:add", id, title: id, text: "", kind: "audio", mediaId: "wav", mode }, true, known).state;
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "x", title: "x", text: "", kind: "audio", mediaId: "wav" }, false, known), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "x", title: "x", text: "", kind: "audio", mediaId: "png" }, true, known), SceneError);
+  state = add("fogo", "ambient");
+  state = add("tema", "music");
+  state = add("outro", "music");
+  state = add("trovao", "effect");
+  const cards = () => state.scenes[0].cards;
+  assertEquals(cards()[0].audio, { mode: "ambient", volume: 80, loop: true, playing: false, startedAt: null, slot: null });
+  assertEquals(cards()[3].audio?.loop, false);
+
+  assertThrows(() => applySceneOp(state, { type: "audio:play", cardId: "fogo" }, false, known, 1000), SceneError);
+  state = applySceneOp(state, { type: "audio:play", cardId: "tema" }, true, known, 1000).state;
+  assertEquals([cards()[1].audio?.playing, cards()[1].audio?.startedAt], [true, 1000]);
+  state = applySceneOp(state, { type: "audio:play", cardId: "fogo" }, true, known, 2000).state;
+  state = applySceneOp(state, { type: "audio:play", cardId: "outro" }, true, known, 3000).state;
+  assertEquals(cards().map((c) => c.audio?.playing), [true, false, true, false]);
+
+  const fired = applySceneOp(state, { type: "audio:play", cardId: "trovao" }, true, known, 4000);
+  assertEquals([fired.fired, fired.state === state, fired.message("Ana")], ["trovao", true, ""]);
+
+  state = applySceneOp(state, { type: "audio:set", cardId: "trovao", slot: 2, volume: 150 }, true).state;
+  assertEquals([cards()[3].audio?.slot, cards()[3].audio?.volume], [2, 100]);
+  state = applySceneOp(state, { type: "audio:set", cardId: "fogo", slot: 2 }, true).state;
+  assertEquals([cards()[0].audio?.slot, cards()[3].audio?.slot], [2, null]);
+  assertThrows(() => applySceneOp(state, { type: "audio:set", cardId: "fogo", slot: 10 }, true), SceneError);
+
+  // Mudar o modo para efeito para o som; a edição de título mantém o tipo e o áudio.
+  state = applySceneOp(state, { type: "audio:set", cardId: "fogo", mode: "effect" }, true).state;
+  assertEquals([cards()[0].audio?.playing, cards()[0].audio?.loop], [false, false]);
+  state = applySceneOp(state, { type: "card:edit", cardId: "fogo", title: "Fogueira", text: "" }, true).state;
+  assertEquals([cards()[0].kind, cards()[0].audio?.mode, cards()[0].mediaId], ["audio", "effect", "wav"]);
+
+  // Trocar de cena e parar tudo silenciam; o estado lido de disco nunca volta tocando.
+  state = applySceneOp(state, { type: "scene:create", id: "s2", name: "Outra" }, true).state;
+  assertEquals(cards().some((c) => c.audio?.playing), false);
+  state = applySceneOp(state, { type: "scene:activate", sceneId: state.scenes[0].id }, true).state;
+  state = applySceneOp(state, { type: "audio:play", cardId: "tema" }, true, known, 5000).state;
+  state = applySceneOp(state, { type: "audio:stopall" }, true).state;
+  assertEquals(cards().some((c) => c.audio?.playing), false);
+  state = applySceneOp(state, { type: "audio:play", cardId: "tema" }, true, known, 5000).state;
+  assertEquals(normalizeSceneState(JSON.parse(JSON.stringify(state))).scenes[0].cards[1].audio?.playing, false);
+});

@@ -1,4 +1,4 @@
-extends Control
+﻿extends Control
 ## A mesa: histórico navegável de tudo que o app anuncia + campo de mensagem.
 ##
 ## Teclas:  ;  abre o campo (a tecla da barra em teclado US)   ,  .  anterior / seguinte
@@ -14,6 +14,8 @@ const FocusZone := preload("res://scripts/ui/focus_zone.gd")
 const SheetPanel := preload("res://scripts/ui/sheet_panel.gd")
 const ScenePanel := preload("res://scripts/ui/scene_panel.gd")
 const CompendiumPanel := preload("res://scripts/ui/compendium_panel.gd")
+const AudioPanel := preload("res://scripts/ui/audio_panel.gd")
+const AudioEngine := preload("res://scripts/audio/audio_engine.gd")
 
 const FUNCTION_KEYS := [KEY_F1, KEY_F2, KEY_F3, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F10]
 const SAFETY_KEYS := {KEY_F5: "stop", KEY_F6: "pause", KEY_F7: "rewind", KEY_F8: "forward"}
@@ -29,7 +31,7 @@ const HELP := (
 	+ "Control Home e Control End: primeira e última mensagem. Page Up e Page Down: dez para trás e para frente. "
 	+ "Comece a mensagem com barra para comandos: barra roll 2d6 mais 3, barra fate mais 3, "
 	+ "barra iron mais 2, barra progress 6, ou barra x para parar a cena. "
-	+ "Tab alterna entre fichas, cena e compêndios; em cada uma, H lê a ajuda. F2: quem está na mesa. F3: soletrar e copiar o código. "
+	+ "Tab alterna entre fichas, cena, áudio e compêndios; em cada uma, H lê a ajuda. F2: quem está na mesa. F3: soletrar e copiar o código. "
 	+ "F5 parar, F6 pausar, F7 retroceder, F8 avançar. F10: sair da mesa."
 )
 
@@ -48,6 +50,8 @@ var _footer: Label
 var _sheets: Control
 var _scene: Control
 var _compendiums: Control
+var _audio: Control
+var _audio_engine: Node
 
 
 func setup(client: Node, you: Dictionary, room: Dictionary, players: Array, history: Array) -> void:
@@ -105,6 +109,15 @@ func _ready() -> void:
 	scene_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	middle.add_child(scene_panel)
 	_scene = scene_panel
+
+	_audio_engine = AudioEngine.new()
+	_audio_engine.setup(_client)
+	add_child(_audio_engine)
+	var audio_panel := AudioPanel.new()
+	audio_panel.setup(_client, _audio_engine)
+	audio_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	middle.add_child(audio_panel)
+	_audio = audio_panel
 
 	var compendium_panel := CompendiumPanel.new()
 	compendium_panel.setup(_client)

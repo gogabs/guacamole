@@ -194,6 +194,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         templates: [...BUILT_IN_TEMPLATES],
         characters: room.characters,
         scene: sceneFor(room.scene, player.role === "host"),
+        serverTime: Date.now(),
         catalog: compendiumCatalog(),
         compendiums: room.compendiums,
       });
@@ -223,6 +224,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         broadcastScene(room);
         scheduleSave();
       }
+      if (outcome.fired) broadcast(room.id, { type: "audio:fire", cardId: outcome.fired, serverTime: Date.now() });
       if (outcome.removed) {
         broadcast(room.id, { type: "sheet:removed", characterId: outcome.removed });
         scheduleSave();

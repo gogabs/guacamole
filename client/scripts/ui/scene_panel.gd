@@ -205,6 +205,12 @@ func _row_text(row: Dictionary) -> String:
 			match str(card.get("kind", "note")):
 				"image":
 					line = "Imagem, %s" % line
+				"audio":
+					var audio: Dictionary = card["audio"]
+					var modes := {"ambient": "ambiência", "music": "música", "effect": "efeito"}
+					line = "Áudio, %s, %s" % [card["title"], modes[audio["mode"]]]
+					if audio["playing"]:
+						line += ", tocando"
 				"clock":
 					var clock: Dictionary = card["clock"]
 					line = "Relógio, %s, %d de %d" % [card["title"], int(clock["filled"]), int(clock["segments"])]

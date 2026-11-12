@@ -261,3 +261,47 @@ Deno.test("mídia: envio, download, limites e uso em cards", async () => {
     await server.shutdown();
   }
 });
+
+Deno.test("áudio: envio, tocar com relógio do servidor e disparo de efeito", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const id = created.room.id;
+    const wav = new Uint8Array(64);
+    wav.set(new TextEncoder().encode("RIFF"), 0);
+    wav.set(new TextEncoder().encode("WAVE"), 8);
+    const sent = await fetch(`${base}/api/rooms/${id}/media?name=Ana&token=${created.hostToken}&filename=trovao.wav`, {
+      method: "POST",
+      body: wav as BufferSource,
+    });
+    const info = await sent.json() as { id: string; kind: string };
+    assertEquals(info.kind, "audio");
+
+    const ana = await TestClient.connect(wsUrl(server.port, id, "Ana", created.hostToken));
+    const welcome = await ana.next("welcome");
+    assert(Math.abs(welcome.serverTime - Date.now()) < 5000);
+    const bia = await TestClient.connect(wsUrl(server.port, id, "Bia"));
+    await bia.next("welcome");
+
+    const add = (cardId: string, mode: string) =>
+      ana.send({ type: "scene:op", op: { type: "card:add", id: cardId, title: cardId, text: "", kind: "audio", mediaId: info.id, mode } as never });
+    add("fogo", "ambient");
+    add("trovao", "effect");
+    await bia.next("scene:sync", (m) => m.scene.scenes[0].cards.length === 2);
+
+    bia.send({ type: "scene:op", op: { type: "audio:play", cardId: "fogo" } });
+    assertEquals((await bia.next("error")).message, "Só o anfitrião faz isso.");
+
+    ana.send({ type: "scene:op", op: { type: "audio:play", cardId: "fogo" } });
+    const playing = await bia.next("scene:sync", (m) => m.scene.scenes[0].cards[0].audio?.playing === true);
+    assert(typeof playing.scene.scenes[0].cards[0].audio?.startedAt === "number");
+
+    ana.send({ type: "scene:op", op: { type: "audio:play", cardId: "trovao" } });
+    assertEquals((await bia.next("audio:fire")).cardId, "trovao");
+    await ana.close();
+    await bia.close();
+  } finally {
+    await server.shutdown();
+  }
+});
