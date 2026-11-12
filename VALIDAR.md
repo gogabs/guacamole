@@ -44,7 +44,7 @@ Marque ao validar e apague o que já foi confirmado.
 
 ## Sons em pontos exatos da zona
 - [ ] Áudio, anfitrião: um som numa zona (P) e G entram no modo de posicionar; a fala explica as teclas e diz "Coluna, linha, à sua esquerda/direita, mais acima/abaixo".
-- [ ] As setas movem o som um quarto de quadrado (Shift, um inteiro) e ele muda de lado e de volume na hora, para você e para os outros.
+- [ ] As setas movem o som um quarto de quadrado (Shift, um inteiro) e ele muda de lado e de volume na hora, para você e para os outros. Agora o áudio da cena usa 3D (1,5 m por quadrado, o alto do grid é a frente): conferir com fones se o som muda claramente de lugar, inclusive dentro da mesma zona.
 - [ ] Limite da zona: o som para e a fala avisa; Home volta ao centro; Enter guarda; Escape devolve ao ponto anterior.
 - [ ] Vários sons na mesma zona em pontos diferentes formam uma cena sonora coerente (mato à esquerda, riacho à direita, fogueira ao fundo).
 - [ ] Encolher a zona tira o ponto que ficou de fora; a cena salva e a mesa salva guardam os pontos.
@@ -74,10 +74,14 @@ Marque ao validar e apague o que já foi confirmado.
 - [ ] Amigos entram na mesa importada pelo novo código sem configurar nada além do endereço.
 
 ## Chat de voz
-- [ ] Região Áudio: "Voz: desligado"; Enter alterna entre desligado, push-to-talk e microfone aberto (o Windows pode pedir permissão ao microfone).
+- [ ] Região Áudio: "Voz: desligado"; Enter alterna entre desligado, push-to-talk e sempre ativo (o Windows pode pedir permissão ao microfone).
 - [ ] Push-to-talk: segurar F4 fala e soltar para; o clique de início e fim é ouvido.
-- [ ] Microfone aberto só transmite quando você fala (sem chiado entre as falas).
+- [ ] Sempre ativo transmite tudo, sem filtro de nível: nenhum microfone baixo é cortado (com a supressão ligada o silêncio sai limpo).
+- [ ] Voz posicional, três modos (Enter na linha): "pan simples", "desligada" e "HRTF, para fones". Com fones, comparar o HRTF com o pan: o seguinte na mesa deve soar à esquerda e fora da cabeça; o oposto, à frente.
+- [ ] O HRTF atual é um modelo de cabeça esférica embutido; dá para trocar por uma esfera medida colocando `hrir.bin` na pasta de dados do app (user://).
 - [ ] Supressão de ruído (ligada por padrão): ventilador, teclado e música de fundo somem sem "engolir" a voz; comparar com ela desligada.
+- [ ] Normalização de volume (ligada por padrão): quem tem o microfone baixo passa a soar no mesmo nível dos outros depois de uns segundos falando; quem estoura é contido sem distorcer; a linha mostra o ganho atual em dB.
+- [ ] A normalização não sobe chiado nem teclado entre as falas, e microfones baixos soam no mesmo nível dos outros.
 - [ ] Escolher microfone e saída das vozes pela lista de dispositivos; a escolha fica salva.
 - [ ] Mesa redonda: com 3 ou mais pessoas, quem entrou logo depois de você soa à esquerda e quem entrou logo antes soa à direita; o oposto soa à frente e um pouco mais baixo. Conferir com todos que a ordem é a mesma para cada um.
 - [ ] Região Áudio, "Voz posicional, mesa redonda": Enter liga e desliga; desligada, todas as vozes soam no centro.

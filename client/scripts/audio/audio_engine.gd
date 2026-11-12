@@ -1,10 +1,19 @@
 extends Node
 ## Toca o áudio da cena ativa: ambiência e música que o anfitrião ligou, e os efeitos que ele
-## dispara. Ambiência numa zona é posicional: cada célula vale CELL pixels, e quem ouve fica no
-## centro da sua zona ("Minha posição") ou no centro do grid. Tudo o mais é o estado do servidor:
-## o card diz se toca e desde quando (no relógio do servidor), e quem entra depois cai no ponto certo.
+## dispara. Ambiência numa zona é posicional: o grid vira um chão de METERS_PER_CELL metros por
+## célula, visto de cima (o alto do grid fica à frente de quem ouve), e quem ouve fica no centro da
+## sua zona ("Onde ouço os sons da cena") ou no centro do grid. A posição vai para o áudio 3D do Godot,
+## que faz o pan pelo ângulo e o volume pela distância, sem depender do tamanho da janela. Tudo o
+## mais é o estado do servidor: o card diz se toca e desde quando (no relógio do servidor), e quem
+## entra depois cai no ponto certo.
 
 const CELL := 100.0
+## Quanto vale uma célula do grid no espaço do áudio, em metros.
+const METERS_PER_CELL := 1.5
+## A distância em que o volume cai à metade (modelo de distância inversa do Godot).
+const UNIT_SIZE := 3.0
+## O pan do Godot, de 0 a 2: acima de 1 abre mais o som para os lados.
+const PANNING_STRENGTH := 1.5
 
 ## Volume geral só de quem ouve, de 0 a 1.
 var master := 1.0
@@ -12,7 +21,7 @@ var master := 1.0
 var listener_zone := ""
 
 var _client: Node
-var _listener: AudioListener2D
+var _listener: AudioListener3D
 var _voices: Dictionary = {}  # id do card -> {player, started, positional, zone}
 
 
@@ -21,7 +30,7 @@ func setup(client: Node) -> void:
 
 
 func _ready() -> void:
-	_listener = AudioListener2D.new()
+	_listener = AudioListener3D.new()
 	add_child(_listener)
 	_listener.make_current()
 	_client.scene_changed.connect(func(_scene: Dictionary) -> void: sync())
@@ -116,7 +125,7 @@ func sync() -> void:
 			_drop(str(id))
 	if scene.is_empty():
 		return
-	_listener.position = _listener_position(scene)
+	_listener.position = _to3(_listener_position(scene))
 	for id in wanted:
 		_ensure(scene, wanted[id])
 
@@ -141,7 +150,7 @@ func _ensure(scene: Dictionary, card: Dictionary) -> void:
 	var player: Node = voice["player"]
 	player.volume_db = _db(audio)
 	if positional:
-		(player as AudioStreamPlayer2D).position = position
+		(player as AudioStreamPlayer3D).position = _to3(position)
 
 
 func _start(scene: Dictionary, card: Dictionary, source: AudioStream, positional: bool) -> Variant:
@@ -159,8 +168,8 @@ func _start(scene: Dictionary, card: Dictionary, source: AudioStream, positional
 			offset = -1.0
 	var player: Node
 	if positional:
-		var spatial := AudioStreamPlayer2D.new()
-		spatial.max_distance = _grid_center(scene).length() * 2.4
+		var spatial := _spatial_player()
+		spatial.position = _to3(_card_spot(scene, card))
 		player = spatial
 	else:
 		player = AudioStreamPlayer.new()
@@ -169,6 +178,19 @@ func _start(scene: Dictionary, card: Dictionary, source: AudioStream, positional
 	if offset >= 0.0:
 		player.call("play", offset)
 	return {"player": player, "started": audio["startedAt"], "positional": positional}
+
+
+## Do plano do grid (x para a direita, y para baixo) para o espaço do áudio (x direita, z para trás).
+func _to3(point: Vector2) -> Vector3:
+	return Vector3(point.x, 0.0, point.y) / CELL * METERS_PER_CELL
+
+
+func _spatial_player() -> AudioStreamPlayer3D:
+	var spatial := AudioStreamPlayer3D.new()
+	spatial.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	spatial.unit_size = UNIT_SIZE
+	spatial.panning_strength = PANNING_STRENGTH
+	return spatial
 
 
 func _drop(card_id: String) -> void:
@@ -208,9 +230,8 @@ func _fire(card_id: String) -> void:
 	var position: Variant = _card_spot(scene, card)
 	var player: Node
 	if position != null:
-		var spatial := AudioStreamPlayer2D.new()
-		spatial.max_distance = _grid_center(scene).length() * 2.4
-		spatial.position = position
+		var spatial := _spatial_player()
+		spatial.position = _to3(position)
 		player = spatial
 	else:
 		player = AudioStreamPlayer.new()

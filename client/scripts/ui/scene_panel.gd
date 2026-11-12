@@ -1,4 +1,4 @@
-﻿extends VBoxContainer
+extends VBoxContainer
 ## Região "Cena": os cards da cena ativa e, para o anfitrião, a lista de cenas. Tudo por teclado.
 ##
 ## Cards:  Setas navegam, Enter edita ou adiciona, Shift+Cima/Baixo movem, Delete remove,
@@ -783,11 +783,12 @@ func _activate(row: Dictionary) -> void:
 			_edit_zone({})
 
 
-## Nota, imagem, relógio, contador, temporizador, cronômetro ou tabela aleatória.
+## Nota, imagem, áudio (só o anfitrião), relógio, contador, temporizador, cronômetro, tabela, turnos, votação ou lista.
 func _new_card() -> void:
-	_begin_choice("Que tipo de card?", [
+	var options: Array = [
 		{"label": "Nota, título e texto", "value": "note"},
 		{"label": "Imagem, escolhida num arquivo", "value": "image"},
+		{"label": "Áudio, escolhido num arquivo, ambiência, música ou efeito", "value": "audio"},
 		{"label": "Relógio, com segmentos para preencher", "value": "clock"},
 		{"label": "Contador, um número com mínimo e máximo", "value": "counter"},
 		{"label": "Temporizador, conta para baixo", "value": "timer"},
@@ -796,13 +797,18 @@ func _new_card() -> void:
 		{"label": "Ordem de turnos, manual, iniciativa ou pipoca", "value": "turns"},
 		{"label": "Votação, com opções e resultado no fim", "value": "poll"},
 		{"label": "Lista de verificação, itens para marcar", "value": "checklist"},
-	], _start_card)
+	]
+	if not _is_host():
+		options = options.filter(func(option: Dictionary) -> bool: return option["value"] != "audio")
+	_begin_choice("Que tipo de card?", options, _start_card)
 
 
 func _start_card(kind: String) -> void:
 	match kind:
 		"image":
 			_pick_image(_new_image_card)
+		"audio":
+			_pick_image(_new_audio_card, "Escolher áudio", PackedStringArray(["*.ogg, *.mp3, *.wav ; Áudio"]), "Enviando o áudio.")
 		"clock":
 			_begin_edit("Título do relógio", "", _new_clock_card)
 		"counter":
@@ -821,6 +827,19 @@ func _start_card(kind: String) -> void:
 					_detail.create(kind, title))
 		_:
 			_edit_card("", "", "")
+
+
+## Nome e tipo do som; o arquivo já está no servidor.
+func _new_audio_card(media_id: String) -> void:
+	_begin_edit("Nome do som", "", func(title: String) -> void:
+		if title.strip_edges().is_empty():
+			return
+		_begin_choice("Que tipo de som?", [
+			{"label": "Ambiência, em loop", "value": "ambient"},
+			{"label": "Música, uma por vez", "value": "music"},
+			{"label": "Efeito, disparado pelo soundboard", "value": "effect"},
+		], func(mode: String) -> void:
+			_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "audio", "mediaId": media_id, "mode": mode})))
 
 
 func _new_counter_card(title: String) -> void:
@@ -1049,19 +1068,19 @@ func _confirm_remove_zone(zone: Dictionary) -> void:
 
 
 ## Escolhe uma imagem no computador, envia ao servidor e chama `done` com o id dela.
-func _pick_image(done: Callable) -> void:
-	var started := SheetLibrary.pick(false, "Escolher imagem", "", func(path: String) -> void:
+func _pick_image(done: Callable, title: String = "Escolher imagem", filters: PackedStringArray = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Imagens"]), sending: String = "Enviando a imagem.") -> void:
+	var started := SheetLibrary.pick(false, title, "", func(path: String) -> void:
 		if path.is_empty():
 			Speech.say("Cancelado.", true)
 			return
-		Speech.say("Enviando a imagem.", true)
+		Speech.say(sending, true)
 		var result: Dictionary = await _client.upload_media(path)
 		if not result["ok"]:
 			Sfx.play("error")
 			Speech.say(str(result["message"]), true)
 			return
 		done.call(str(result["id"])),
-		PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Imagens"]))
+		filters)
 	if not started:
 		Sfx.play("error")
 		Speech.say("Este sistema não oferece o seletor de arquivos.", true)

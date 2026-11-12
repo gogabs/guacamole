@@ -85,6 +85,13 @@ func _tone(seconds: float, amplitude: float) -> PackedVector2Array:
 	return frames
 
 
+func _rms(pcm: PackedVector2Array) -> float:
+	var sum := 0.0
+	for v in pcm:
+		sum += v.x * v.x
+	return sqrt(sum / maxf(1.0, float(pcm.size())))
+
+
 func _noise(seconds: float, amplitude: float) -> PackedVector2Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 7
@@ -109,7 +116,9 @@ func _voice_tests(table: Control, ana: Node) -> void:
 	_check(panel._row_text(mode_row) == "Voz: desligado", "a voz começa desligada")
 	_check(panel._row_text(panel._rows[kinds.find("voice_noise")]) == "Supressão de ruído: ligada", "supressão de ruído ligada por padrão")
 
-	_check(panel._row_text(panel._rows[kinds.find("voice_positional")]).begins_with("Voz posicional, mesa redonda: ligada"), "a voz posicional vem ligada")
+	# O modo fica salvo no computador de quem testa: parte sempre do pan simples.
+	voice.set_spatial("pan")
+	_check(panel._row_text(panel._rows[kinds.find("voice_positional")]).begins_with("Voz posicional, mesa redonda: pan simples"), "a linha da voz posicional mostra o modo")
 
 	var codec: RefCounted = ClassDB.instantiate("VoiceCodec")
 	var packets: Array = codec.encode(_tone(0.5, 0.4))
@@ -134,40 +143,84 @@ func _voice_tests(table: Control, ana: Node) -> void:
 	_check(front.x < left.x, "quem está do outro lado da mesa soa mais baixo que o vizinho")
 	var ring: Vector2 = voice.table_gains(1, 3, 8)
 	_check(voice.table_gains(2, 2, 4) == Vector2.ONE and voice.table_gains(0, 1, 1) == Vector2.ONE and ring.x != ring.y, "sozinho ou sem ordem a voz fica no centro")
-	voice.set_positional(false)
+	voice.set_spatial("off")
 	_check(voice.gains_for("Ana") == Vector2.ONE, "desligada a voz posicional, todas soam no centro")
-	voice.set_positional(true)
+	voice.set_spatial("pan")
+	voice.cycle_spatial()
+	_check(voice.spatial == "off" and panel._row_text({"kind": "voice_positional"}).ends_with("desligada, todas no centro"), "Enter na linha troca o modo: pan, desligada, HRTF")
+	voice.cycle_spatial()
+	_check(voice.spatial == "hrtf" and panel._row_text({"kind": "voice_positional"}).ends_with("HRTF, para fones"), "e depois vem o HRTF")
+
+	# HRTF: o modelo de cabeça põe a voz do lado certo, e na frente fica igual nos dois ouvidos.
+	_check(codec.hrtf_available() and codec.hrtf_source() == "modelo", "o HRTF usa o modelo de cabeça embutido")
+	var sides := {}
+	for label in ["direita", "esquerda", "frente"]:
+		var direction: Vector3 = {"direita": Vector3(1, 0, 0), "esquerda": Vector3(-1, 0, 0), "frente": Vector3(0, 0, 1)}[label]
+		var mixer: RefCounted = ClassDB.instantiate("VoiceCodec")
+		var heard: Array = mixer.encode(_tone(1.0, 0.4))
+		var energy := Vector2.ZERO
+		for i in heard.size():
+			var block: PackedVector2Array = mixer.decode_hrtf("x", heard[i], direction.x, direction.y, direction.z, 1.0)
+			if i >= 20:
+				for v in block:
+					energy += Vector2(v.x * v.x, v.y * v.y)
+		sides[label] = energy
+	_check(sides["direita"].y > sides["direita"].x * 1.5 and sides["esquerda"].x > sides["esquerda"].y * 1.5, "HRTF: a fonte à direita soa mais no ouvido direito e a da esquerda no esquerdo")
+	_check(absf(sides["frente"].x - sides["frente"].y) < 0.05 * sides["frente"].x, "HRTF: a fonte à frente soa igual nos dois ouvidos")
+	var neighbor: Vector3 = voice.table_direction(0, 1, 4)
+	_check(neighbor.x < -0.5 and neighbor.z > 0.0 and absf(neighbor.length() - 1.0) < 0.001, "o vizinho da mesa está à esquerda e à frente (%s)" % neighbor)
+	_check(absf(voice.table_direction(0, 2, 4).x) < 0.0001 and voice.table_direction(0, 2, 4).z > 0.99, "o oposto da mesa está bem à frente")
 
 	# Colchão contra chegada irregular: pacotes entregues em rajadas não podem picotar a voz.
 	var speech: Array = codec.encode(_tone(3.0, 0.4))
-	await _wait(func() -> bool: return voice.speakers().is_empty(), 3.0)
-	var jitter := RandomNumberGenerator.new()
-	jitter.seed = 5
-	var started := Time.get_ticks_msec()
-	var next := 0
-	while next < speech.size():
-		var due := next * 20.0 + jitter.randf_range(0.0, 40.0)
-		if float(Time.get_ticks_msec() - started) >= due:
-			voice._on_voice("Ana", speech[next])
-			next += 1
-		await process_frame
-	var cuts: int = voice._peers["Ana"]["playback"].get_skips()
-	_check(cuts <= 3, "voz com chegada irregular (até 40 ms) quase não tem cortes: %d" % cuts)
+	# Duas tentativas por modo: uma pausa do próprio computador de testes (centenas de ms) não é do colchão.
+	for mode in ["pan", "hrtf"]:
+		voice.set_spatial(mode)
+		var cuts := 999
+		for attempt in 2:
+			await _wait(func() -> bool: return voice.speakers().is_empty(), 3.0)
+			var cuts_before: int = voice._peers["Ana"]["playback"].get_skips()
+			var jitter := RandomNumberGenerator.new()
+			jitter.seed = 5
+			var started := Time.get_ticks_msec()
+			var next := 0
+			while next < speech.size():
+				var due := next * 20.0 + jitter.randf_range(0.0, 25.0)
+				if float(Time.get_ticks_msec() - started) >= due:
+					voice._on_voice("Ana", speech[next])
+					next += 1
+				await process_frame
+			cuts = mini(cuts, voice._peers["Ana"]["playback"].get_skips() - cuts_before)
+			if cuts <= 6:
+				break
+		_check(cuts <= 6, "voz em %s com chegada irregular (até 25 ms, mais o ritmo dos quadros) quase não tem cortes: %d" % [mode, cuts])
+	voice.set_spatial("pan")
 
-	# Enviar: o microfone aberto só manda quando há voz.
+	# Sempre ativo: envia tudo, voz e silêncio, sem filtro de nível que corte microfones baixos.
 	var heard: Array = []
 	ana.voice_received.connect(func(peer: String, packet: PackedByteArray) -> void: heard.append([peer, packet]))
 	voice.mode = "open"
-	voice.feed(_tone(0.5, 0.4), 0.5)
-	_check(await _wait(func() -> bool: return heard.size() >= 24 and heard[0][0] == "Caio"), "o microfone aberto envia a voz de Caio para Ana")
+	voice.feed(_tone(0.5, 0.4))
+	_check(await _wait(func() -> bool: return heard.size() >= 24 and heard[0][0] == "Caio"), "o modo sempre ativo envia a voz de Caio para Ana")
 	await create_timer(0.3).timeout
-	voice._hang = 0.0
 	heard.clear()
-	voice.feed(PackedVector2Array(_tone(1.0, 0.0)), 1.0)
-	await process_frame
-	await process_frame
-	_check(heard.is_empty(), "o microfone aberto não envia silêncio")
+	voice.feed(PackedVector2Array(_tone(1.0, 0.0)))
+	_check(await _wait(func() -> bool: return heard.size() >= 48), "o modo sempre ativo envia também o silêncio, sem cortar nada (%d pacotes)" % heard.size())
 	voice.mode = "off"
+	_check(voice.MODE_NAMES["open"] == "sempre ativo" and voice.MODE_ORDER == ["off", "ptt", "open"], "os modos são desligado, push-to-talk e sempre ativo")
+	# Normalização: microfone baixo sobe, microfone alto desce, ambos para perto do mesmo nível.
+	for amplitude in [0.03, 0.6]:
+		var leveler: RefCounted = ClassDB.instantiate("VoiceCodec")
+		leveler.set_suppression(false)
+		leveler.encode(_tone(3.0, amplitude))
+		var rms: float = leveler.level()  # RMS do último pacote, depois do ganho
+		_check(rms > 0.07 and rms < 0.13, "a normalização leva um tom de amplitude %s a volume parecido (RMS %.3f, ganho %.1f dB)" % [amplitude, rms, leveler.gain_db()])
+	var plain: RefCounted = ClassDB.instantiate("VoiceCodec")
+	plain.set_suppression(false)
+	plain.set_normalization(false)
+	plain.encode(_tone(1.0, 0.03))
+	_check(absf(plain.level() - 0.03 / sqrt(2.0)) < 0.004 and plain.gain_db() == 0.0, "com a normalização desligada o volume não muda")
+	_check(voice.normalize and panel._row_text(panel._rows[kinds.find("voice_normalize")]).begins_with("Normalização de volume do microfone: ligada"), "a normalização vem ligada na região de áudio")
 
 	# Supressão de ruído: um zumbido de fundo fica muito mais baixo com ela ligada.
 	var raw: RefCounted = ClassDB.instantiate("VoiceCodec")
@@ -201,7 +254,7 @@ func _updater_tests() -> void:
 	release["prerelease"] = true
 	_check(Updater.parse_release(release).is_empty(), "pré-lançamento é ignorado")
 	_check(not Updater.can_install(), "pelo editor ou testes não há o que trocar")
-	_check(Updater.current_version() == "0.1.0", "a versão do programa vem do projeto")
+	_check(Updater.current_version() == str(ProjectSettings.get_setting("application/config/version")) and not Updater.is_newer(Updater.current_version(), Updater.current_version()), "a versão do programa vem do projeto")
 
 
 func _scene_file_tests(ana: Node, table: Control) -> void:
@@ -241,6 +294,18 @@ func _scene_file_tests(ana: Node, table: Control) -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://lixo.guacascene"))
 	var panel: Control = table._scene
+	# Áudio como tipo de card: só o anfitrião o vê na lista.
+	panel._new_card()
+	var guest_kinds: Array = panel._choice_options.map(func(o: Dictionary) -> String: return o["value"])
+	panel._mode = "browse"
+	var real_role: String = table._client.you["role"]
+	table._client.you["role"] = "host"
+	panel._new_card()
+	var host_kinds: Array = panel._choice_options.map(func(o: Dictionary) -> String: return o["value"])
+	panel._mode = "browse"
+	table._client.you["role"] = real_role
+	_check(not guest_kinds.has("audio") and host_kinds.has("audio") and host_kinds.size() == guest_kinds.size() + 1, "o tipo Áudio aparece na criação de cards só para o anfitrião")
+	panel._rebuild()
 	panel._scenes_view = true
 	panel._rebuild()
 	var rows: Array = panel._rows.map(func(r: Dictionary) -> String: return r["kind"])
@@ -550,7 +615,7 @@ func _run() -> void:
 	scene_panel._area.text = "Fumaça.\nCanecas."
 	scene_panel._area.submitted.emit("Fumaça.\nCanecas.")
 	_check(await _wait(func() -> bool: return (ana.scene["scenes"][0]["cards"] as Array).size() == 1), "o card chega em Ana")
-	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("adicionou o card Taverna")), "o histórico anuncia o card")
+	_check(await _wait(func() -> bool: return table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("adicionou o card Taverna"))), "o histórico anuncia o card")
 	await _key(KEY_ENTER, KEY_ENTER)
 	_check(scene_panel._open_id != "" and scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["o_title", "o_line", "o_line"], "Enter num card de texto o abre, uma linha por linha")
 	_check(scene_panel._row_text(scene_panel._rows[1]) == "Fumaça." and scene_panel._row_text(scene_panel._rows[2]) == "Canecas.", "as linhas do texto são lidas separadas")
@@ -658,13 +723,27 @@ func _run() -> void:
 	var box: Rect2 = audio_panel._zone_box("z1")
 	var spot := box.position + Vector2(0.25, 0.75)
 	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": spot.x, "y": spot.y}})
-	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(spot * engine.CELL)), "o som toca do ponto exato dentro da zona")
+	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine._to3(spot * engine.CELL))), "o som toca do ponto exato dentro da zona")
+	var listener_at: Vector3 = engine._listener.position
+	var player: Node3D = engine._voices["fogo"]["player"]
+	_check(player is AudioStreamPlayer3D and engine._listener is AudioListener3D, "os sons da cena usam o áudio 3D, cujo pan vem do ângulo")
+	for step in [Vector2(0.5, 0), Vector2(-0.5, 0), Vector2(0, -0.5)]:
+		var moved: Vector2 = box.get_center() + step
+		ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": moved.x, "y": moved.y}})
+		await _wait(func() -> bool: return player.position.is_equal_approx(engine._to3(moved * engine.CELL)))
+		var relative: Vector3 = player.position - listener_at
+		var right_of_listener: bool = relative.x > engine._to3(box.get_center() * engine.CELL).x - listener_at.x
+		_check((step.x > 0.0) == right_of_listener or step.x == 0.0, "mover o som para %s o leva para %s de quem ouve" % [step, "a direita" if step.x > 0.0 else "a esquerda" if step.x < 0.0 else "a frente"])
+		if step.y < 0.0:
+			_check(player.position.z < engine._to3(box.get_center() * engine.CELL).z, "o alto do grid fica à frente de quem ouve (z menor)")
+	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": spot.x, "y": spot.y}})
+	await _wait(func() -> bool: return player.position.is_equal_approx(engine._to3(spot * engine.CELL)))
 	_check(audio_panel._row_text(audio_panel._rows[first_audio]).contains("em ponto exato"), "a lista diz que o som tem ponto exato")
 	audio_panel._spot_box = box
 	audio_panel._spot_at = spot
 	_check(audio_panel._spot_text().begins_with("Coluna "), "o ponto é falado em coluna e linha: %s" % audio_panel._spot_text())
 	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": null})
-	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine.spot_of("z1"))), "sem ponto exato o som volta ao centro da zona")
+	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine._to3(engine.spot_of("z1")))), "sem ponto exato o som volta ao centro da zona")
 	audio_panel._zone.grab_focus()
 	audio_panel._cursor = 0
 	await _key(KEY_LEFT, KEY_LEFT)

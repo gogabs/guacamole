@@ -130,7 +130,7 @@ func _rebuild() -> void:
 	_rows.append({"kind": "master"})
 	_rows.append({"kind": "position"})
 	if _voice.available():
-		for kind in ["voice_mode", "voice_positional", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
+		for kind in ["voice_mode", "voice_positional", "voice_noise", "voice_normalize", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
 			_rows.append({"kind": kind})
 	else:
 		_rows.append({"kind": "header", "text": "Voz indisponível: a extensão de voz não foi carregada."})
@@ -172,9 +172,14 @@ func _row_text(row: Dictionary) -> String:
 			var hint: String = ", segure F4 para falar" if _voice.mode == "ptt" else ""
 			return "Voz: %s%s" % [_voice.MODE_NAMES[_voice.mode], hint]
 		"voice_positional":
-			return "Voz posicional, mesa redonda: %s" % ("ligada" if _voice.positional else "desligada, todas no centro")
+			return "Voz posicional, mesa redonda: %s" % _voice.SPATIAL_NAMES[_voice.spatial]
 		"voice_noise":
 			return "Supressão de ruído: %s" % ("ligada" if _voice.suppress else "desligada")
+		"voice_normalize":
+			if not _voice.normalize:
+				return "Normalização de volume do microfone: desligada"
+			var db: float = _voice.gain_db()
+			return "Normalização de volume do microfone: ligada%s" % (", ganho atual %+d dB" % roundi(db) if absf(db) >= 1.0 else "")
 		"voice_in":
 			return "Microfone: %s" % AudioServer.input_device
 		"voice_out":
@@ -215,7 +220,7 @@ func _is_button(row: Dictionary) -> bool:
 	match row["kind"]:
 		"header", "voice_speakers":
 			return false
-		"master", "position", "voice_mode", "voice_positional", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce":
+		"master", "position", "voice_mode", "voice_positional", "voice_noise", "voice_normalize", "voice_in", "voice_out", "voice_volume", "voice_announce":
 			return true
 		_:
 			return _is_host()
@@ -429,11 +434,15 @@ func _activate(row: Dictionary) -> void:
 			_rebuild()
 			Speech.say(_row_text(row), true)
 		"voice_positional":
-			_voice.set_positional(not _voice.positional)
+			_voice.cycle_spatial()
 			_rebuild()
 			Speech.say(_row_text(row), true)
 		"voice_noise":
 			_voice.set_suppression(not _voice.suppress)
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_normalize":
+			_voice.set_normalization(not _voice.normalize)
 			_rebuild()
 			Speech.say(_row_text(row), true)
 		"voice_announce":

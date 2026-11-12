@@ -8,7 +8,8 @@ extends Node
 ## mesa soa à frente, um pouco mais baixo. O pan é aplicado aos próprios pacotes (ganho esquerdo e
 ## direito), então não depende de janela nem de câmera.
 ##
-## Enviar: segure F4 (push-to-talk) ou deixe o microfone aberto, que só manda quando há voz.
+## Enviar: segure F4 (push-to-talk) ou deixe sempre ativo, que manda tudo o que o microfone capta
+## (sem filtro de nível: um filtro cortaria microfones baixos).
 ## Escutar sempre funciona, mesmo com o próprio microfone desligado.
 
 signal speakers_changed
@@ -26,19 +27,28 @@ const CUSHION_MAX := 0.24
 const CUSHION_STEP := 0.04
 const MID_SPEECH_MS := 150
 const SILENCE_MS := 1500
-const OPEN_GATE := 0.008  # volume mínimo para o microfone aberto enviar
-const OPEN_HANG := 0.35  # segundos que o microfone aberto continua enviando depois da voz
 const SPEAKING_FOR := 0.4
 const SETTINGS := "user://voz.cfg"
-const MODE_NAMES := {"off": "desligado", "ptt": "push-to-talk", "open": "microfone aberto"}
+const MODE_NAMES := {"off": "desligado", "ptt": "push-to-talk", "open": "sempre ativo"}
 const MODE_ORDER := ["off", "ptt", "open"]
+const SPATIAL_NAMES := {
+	"hrtf": "HRTF, para fones",
+	"pan": "pan simples",
+	"off": "desligada, todas no centro",
+}
+const SPATIAL_ORDER := ["hrtf", "pan", "off"]
+## Esfera de respostas de cabeça opcional (formato do crate hrtf, como as da base IRCAM): se o
+## arquivo existir, vale no lugar do modelo embutido.
+const HRIR_FILE := "user://hrir.bin"
 
 ## off | ptt | open. Sempre começa desligado: ninguém abre o microfone sem querer.
 var mode := "off"
 var suppress := true
+## Normalização: leva o volume do próprio microfone a um nível constante (sobe os baixos).
+var normalize := true
 var announce := false
-## Voz posicional (mesa redonda). Desligada, todas as vozes soam no centro.
-var positional := true
+## Como a voz é posicionada na mesa redonda: "hrtf" (fones), "pan" (esquerda e direita) ou "off".
+var spatial := "pan"
 var volume := 1.0
 var transmitting := false
 
@@ -48,7 +58,6 @@ var _capture: AudioEffectCapture
 var _mic: AudioStreamPlayer
 var _peers: Dictionary = {}  # nome -> {player, playback, heard}
 var _speaking: Dictionary = {}  # nome -> true enquanto fala
-var _hang := 0.0
 var _talking := false
 
 
@@ -62,6 +71,11 @@ func _ready() -> void:
 	_load_settings()
 	if _codec != null:
 		_codec.set_suppression(suppress)
+		_codec.set_normalization(normalize)
+		if FileAccess.file_exists(HRIR_FILE):
+			_codec.load_hrir_file(ProjectSettings.globalize_path(HRIR_FILE))
+		elif spatial == "hrtf":
+			_codec.hrtf_available()
 	_client.voice_received.connect(_on_voice)
 	_client.presence_changed.connect(_on_presence)
 
@@ -82,8 +96,11 @@ func _load_settings() -> void:
 	if file.load(SETTINGS) != OK:
 		return
 	suppress = bool(file.get_value("voz", "supressao", true))
+	normalize = bool(file.get_value("voz", "normalizar", true))
 	announce = bool(file.get_value("voz", "avisar", false))
-	positional = bool(file.get_value("voz", "posicional", true))
+	spatial = str(file.get_value("voz", "espacial", "pan" if bool(file.get_value("voz", "posicional", true)) else "off"))
+	if not SPATIAL_ORDER.has(spatial):
+		spatial = "pan"
 	volume = clampf(float(file.get_value("voz", "volume", 1.0)), 0.0, 1.0)
 	var input := str(file.get_value("voz", "entrada", ""))
 	if not input.is_empty() and input in AudioServer.get_input_device_list():
@@ -96,8 +113,9 @@ func _load_settings() -> void:
 func _save_settings() -> void:
 	var file := ConfigFile.new()
 	file.set_value("voz", "supressao", suppress)
+	file.set_value("voz", "normalizar", normalize)
 	file.set_value("voz", "avisar", announce)
-	file.set_value("voz", "posicional", positional)
+	file.set_value("voz", "espacial", spatial)
 	file.set_value("voz", "volume", volume)
 	file.set_value("voz", "entrada", AudioServer.input_device)
 	file.set_value("voz", "saida", AudioServer.output_device)
@@ -108,7 +126,6 @@ func set_mode(value: String) -> void:
 	if value == mode or not available():
 		return
 	mode = value
-	_hang = 0.0
 	_talking = false
 	if mode == "off":
 		_stop_mic()
@@ -127,14 +144,33 @@ func set_suppression(on: bool) -> void:
 	_save_settings()
 
 
+func set_normalization(on: bool) -> void:
+	normalize = on
+	if _codec != null:
+		_codec.set_normalization(on)
+	_save_settings()
+
+
+## O ganho que a normalização aplica agora, em dB (0 se desligada).
+func gain_db() -> float:
+	return _codec.gain_db() if _codec != null and normalize else 0.0
+
+
 func set_announce(on: bool) -> void:
 	announce = on
 	_save_settings()
 
 
-func set_positional(on: bool) -> void:
-	positional = on
-	_save_settings()
+func set_spatial(value: String) -> void:
+	if SPATIAL_ORDER.has(value):
+		spatial = value
+		if value == "hrtf" and _codec != null:
+			_codec.hrtf_available()  # monta o modelo agora, e não no meio da primeira fala
+		_save_settings()
+
+
+func cycle_spatial() -> void:
+	set_spatial(SPATIAL_ORDER[(SPATIAL_ORDER.find(spatial) + 1) % SPATIAL_ORDER.size()])
 
 
 func set_volume(value: float) -> void:
@@ -199,7 +235,7 @@ func _stop_mic() -> void:
 	transmitting = false
 
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	_update_speaking()
 	if _mic == null or _capture == null:
 		return
@@ -214,20 +250,14 @@ func _process(delta: float) -> void:
 	if not talking:
 		transmitting = false
 		return
-	feed(frames, delta)
+	feed(frames)
 
 
 ## Codifica o que o microfone captou e manda. Público para os testes alimentarem sem microfone.
-func feed(frames: PackedVector2Array, delta: float = 0.0) -> void:
+func feed(frames: PackedVector2Array) -> void:
 	if _codec == null:
 		return
 	var packets: Array = _codec.encode(frames)
-	var level: float = _codec.level()
-	if mode == "open":
-		_hang = OPEN_HANG if level > OPEN_GATE else maxf(0.0, _hang - delta)
-		if _hang <= 0.0:
-			transmitting = false
-			return
 	transmitting = true
 	for packet in packets:
 		_client.send_voice(packet)
@@ -238,8 +268,14 @@ func feed(frames: PackedVector2Array, delta: float = 0.0) -> void:
 func _on_voice(peer: String, packet: PackedByteArray) -> void:
 	if _codec == null or peer == str(_client.you.get("name", "")):
 		return
-	var gains := gains_for(peer)
-	var pcm: PackedVector2Array = _codec.decode(peer, packet, gains.x, gains.y)
+	var pcm: PackedVector2Array
+	var place := _placement(peer)
+	if spatial == "hrtf" and not place.is_empty():
+		var direction: Vector3 = place["direction"]
+		pcm = _codec.decode_hrtf(peer, packet, direction.x, direction.y, direction.z, place["closeness"])
+	else:
+		var gains := gains_for(peer)
+		pcm = _codec.decode(peer, packet, gains.x, gains.y)
 	if pcm.is_empty():
 		return
 	var voice := _voice_of(peer)
@@ -282,16 +318,27 @@ func _voice_of(peer: String) -> Dictionary:
 
 ## Ganho (esquerdo, direito) com que peer é ouvido, pela posição dele na mesa redonda.
 func gains_for(peer: String) -> Vector2:
-	if not positional:
+	var place := _placement(peer)
+	if spatial == "off" or place.is_empty():
 		return Vector2.ONE
+	return table_gains(place["me"], place["other"], place["count"])
+
+
+## Onde peer está na mesa em relação a quem ouve: {me, other, count, direction, closeness}, ou vazio
+## se um dos dois não está na lista de jogadores.
+func _placement(peer: String) -> Dictionary:
 	var names: Array = []
 	for player in _client.players:
 		names.append(str(player["name"]))
 	var me := names.find(str(_client.you.get("name", "")))
 	var other := names.find(peer)
-	if me < 0 or other < 0:
-		return Vector2.ONE
-	return table_gains(me, other, names.size())
+	if me < 0 or other < 0 or names.size() < 2 or me == other:
+		return {}
+	return {
+		"me": me, "other": other, "count": names.size(),
+		"direction": table_direction(me, other, names.size()),
+		"closeness": table_closeness(me, other, names.size()),
+	}
 
 
 ## Mesa redonda: count pessoas em volta, me e other são os lugares (0 a count-1). Quem ouve
@@ -301,12 +348,31 @@ func gains_for(peer: String) -> Vector2:
 static func table_gains(me: int, other: int, count: int) -> Vector2:
 	if count < 2 or me == other:
 		return Vector2.ONE
-	var phi := TAU * float(other - me) / float(count)
-	var offset := Vector2(-sin(phi), cos(phi) - 1.0)  # em raios da mesa; para a frente é -y
+	var offset := _table_offset(me, other, count)
 	var pan := clampf(offset.x / maxf(offset.length(), 0.0001), -1.0, 1.0)
 	var angle := (pan + 1.0) * PI / 4.0
-	var closeness := 1.0 - 0.35 * clampf(offset.length() / 2.0, 0.0, 1.0)
-	return Vector2(minf(1.0, sqrt(2.0) * cos(angle)), minf(1.0, sqrt(2.0) * sin(angle))) * closeness
+	return Vector2(minf(1.0, sqrt(2.0) * cos(angle)), minf(1.0, sqrt(2.0) * sin(angle))) * table_closeness(me, other, count)
+
+
+## A direção da cabeça de quem ouve até other: x para a direita, y para cima, z para a frente.
+static func table_direction(me: int, other: int, count: int) -> Vector3:
+	if count < 2 or me == other:
+		return Vector3(0, 0, 1)
+	var offset := _table_offset(me, other, count)
+	return Vector3(offset.x, 0.0, -offset.y).normalized()
+
+
+## O volume pela distância: 1 ao lado, 0,65 do outro lado da mesa.
+static func table_closeness(me: int, other: int, count: int) -> float:
+	if count < 2 or me == other:
+		return 1.0
+	return 1.0 - 0.35 * clampf(_table_offset(me, other, count).length() / 2.0, 0.0, 1.0)
+
+
+## De quem ouve (na base da mesa, de frente para o centro) até other, em raios da mesa; para a frente é -y.
+static func _table_offset(me: int, other: int, count: int) -> Vector2:
+	var phi := TAU * float(other - me) / float(count)
+	return Vector2(-sin(phi), cos(phi) - 1.0)
 
 
 func _on_presence(players: Array) -> void:
