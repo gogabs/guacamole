@@ -15,7 +15,9 @@ param(
   [switch]$Draft
 )
 
-$ErrorActionPreference = "Stop"
+# Programas nativos escrevem progresso em stderr; no PowerShell 5.1 isso viraria erro com "Stop".
+# Os códigos de saída são conferidos um a um abaixo.
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
