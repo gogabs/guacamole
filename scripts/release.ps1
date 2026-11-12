@@ -46,12 +46,15 @@ if (-not $SkipTests) {
   if ($LASTEXITCODE -ne 0) { throw "Os testes do Deno falharam." }
 }
 
+# Um Guacamole.exe aberto a partir da pasta da release trava a sobrescrita, e a exportação falha em silêncio.
+Get-Process -Name Guacamole -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root*" } | ForEach-Object { throw "Feche o Guacamole.exe aberto a partir de $($_.Path) antes de publicar." }
+$started = Get-Date
 $out = Join-Path $root "dist/release"
 Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$out/cliente" | Out-Null
 
 godot --headless --path client --export-release "Windows Desktop" "$out/cliente/Guacamole.exe"
-if (-not (Test-Path "$out/cliente/Guacamole.exe")) { throw "A exportação do cliente falhou." }
+if (-not (Test-Path "$out/cliente/Guacamole.exe") -or (Get-Item "$out/cliente/Guacamole.exe").LastWriteTime -lt $started) { throw "A exportação do cliente falhou: o Guacamole.exe não foi regravado." }
 # A exportação às vezes deixa temporários (*.tmp, *~RF*.TMP) ao lado do executável; eles não vão no zip.
 $real = Get-ChildItem "$out/cliente" -File | Where-Object { $_.Extension -ine ".tmp" }
 Compress-Archive -Path $real.FullName -DestinationPath "$out/Guacamole-cliente-windows.zip" -Force
