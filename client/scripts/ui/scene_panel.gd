@@ -18,12 +18,18 @@ const EditArea := preload("res://scripts/ui/edit_area.gd")
 const FocusZone := preload("res://scripts/ui/focus_zone.gd")
 const SceneCanvas := preload("res://scripts/ui/scene_canvas.gd")
 const SheetLibrary := preload("res://scripts/ui/sheet_library.gd")
+const CardDetail := preload("res://scripts/ui/card_detail.gd")
 
 const SEGMENT_CHOICES := [4, 6, 8, 10, 12]
+const DURATION_PROMPT := "Duração: minutos e segundos como 2:30, ou só os minutos"
+const TABLE_PROMPT := "Entradas da tabela, uma por linha, ao menos duas"
 
 const HELP_CARDS := (
-	"Cena. Setas navegam, Enter edita o card ou adiciona um novo, Shift mais cima ou baixo movem o card, "
-	+ "Delete remove, P põe o card numa zona ou o solta, Esquerda e direita giram um relógio. "
+	"Cena. Setas navegam, Enter abre o card ou adiciona um novo, Shift mais cima ou baixo movem o card, "
+	+ "Control mais cima ou baixo pula entre as zonas. "
+	+ "Enter abre o card para ler linha a linha, E edita, Delete remove, P põe o card numa zona ou o solta. "
+	+ "Esquerda e direita giram um relógio ou mudam um contador, com Shift de cinco em cinco. "
+	+ "Enter num temporizador ou cronômetro inicia ou pausa, R zera; Enter numa tabela sorteia. "
 	+ "Só o anfitrião: V oculta ou revela o card, Enter numa zona a edita, S abre a lista de cenas."
 )
 const HELP_GRID := (
@@ -42,6 +48,13 @@ var _edit: LineEdit
 var _area: TextEdit
 
 var _canvas: Control
+## Card aberto (ordem de turnos, votação ou lista): a lista mostra o interior dele.
+var _open_id := ""
+var _detail: RefCounted
+var _follow_entry := ""
+var _tick := 0.0
+var _next_kind := "text"  # tipo de digitação do próximo campo de uma linha
+var _ended: Dictionary = {}  # "card/início": o fim deste temporizador já foi avisado
 ## Id do card que o cursor deve seguir depois da próxima mudança (ao mover ou pôr numa zona).
 var _follow := ""
 var _seen_active := ""
@@ -77,6 +90,7 @@ func setup(client: Node) -> void:
 func _ready() -> void:
 	add_theme_constant_override("separation", 8)
 
+	_detail = CardDetail.new(self)
 	_canvas = SceneCanvas.new()
 	_canvas.setup(_client)
 	add_child(_canvas)
@@ -112,6 +126,29 @@ func _ready() -> void:
 	_client.server_error.connect(func(_message: String) -> void: _announce_next = false)
 	_seen_active = str(_client.scene.get("activeId", ""))
 	_rebuild()
+
+
+## Mantém a lista em dia com os temporizadores e cronômetros que estão rodando e avisa, em cada
+## cliente, quando um temporizador acaba (o relógio é o do servidor, então todos avisam juntos).
+func _process(delta: float) -> void:
+	_tick += delta
+	if _tick < 0.5 or _client == null:
+		return
+	_tick = 0.0
+	var running := false
+	for card in _active().get("cards", []):
+		var timer: Variant = card.get("timer")
+		if not timer is Dictionary or not timer["running"]:
+			continue
+		running = true
+		if timer["mode"] == "down" and _elapsed(timer) >= float(timer["duration"]):
+			var key := "%s/%s" % [card["id"], timer["startedAt"]]
+			if not _ended.has(key):
+				_ended[key] = true
+				Sfx.play("tick", 1.6)
+				Speech.say("Tempo esgotado: %s" % card["title"], true)
+	if running and _mode == "browse":
+		_render()
 
 
 # --- Dados --------------------------------------------------------------------------------
@@ -157,7 +194,11 @@ func _flat(text: String) -> String:
 
 func _rebuild() -> void:
 	_rows = []
-	if _scenes_view:
+	if _open_id != "" and _detail.card().is_empty():
+		_open_id = ""
+	if _open_id != "":
+		_rows.assign(_detail.rows())
+	elif _scenes_view:
 		for scene in _client.scene.get("scenes", []):
 			_rows.append({"kind": "scene", "scene": scene})
 		_rows.append({"kind": "new_scene"})
@@ -192,11 +233,18 @@ func _rebuild() -> void:
 			if _rows[i]["kind"] == "card" and _active()["cards"][_rows[i]["index"]]["id"] == _follow:
 				_cursor = i
 		_follow = ""
+	if not _follow_entry.is_empty() and _open_id != "":
+		for i in _rows.size():
+			if _rows[i]["kind"] == "o_entry" and _detail.card()["turns"]["entries"][_rows[i]["index"]]["id"] == _follow_entry:
+				_cursor = i
+		_follow_entry = ""
 	_canvas.show_scene(_active())
 	_render()
 
 
 func _row_text(row: Dictionary) -> String:
+	if str(row["kind"]).begins_with("o_"):
+		return _detail.text(row)
 	match row["kind"]:
 		"card":
 			var card: Dictionary = _active()["cards"][row["index"]]
@@ -205,6 +253,18 @@ func _row_text(row: Dictionary) -> String:
 			match str(card.get("kind", "note")):
 				"image":
 					line = "Imagem, %s" % line
+				"turns", "poll", "checklist":
+					line = _detail.summary(card)
+				"counter":
+					var counter: Dictionary = card["counter"]
+					line = "Contador, %s: %d, de %d a %d" % [card["title"], int(counter["value"]), int(counter["min"]), int(counter["max"])]
+				"timer", "stopwatch":
+					line = _timer_text(card)
+				"table":
+					var table: Dictionary = card["table"]
+					line = "Tabela, %s, %s" % [card["title"], _plural((table["entries"] as Array).size(), "entrada", "entradas")]
+					if table["last"] != null:
+						line += ", último sorteio: %s" % table["entries"][int(table["last"])]
 				"audio":
 					var audio: Dictionary = card["audio"]
 					var modes := {"ambient": "ambiência", "music": "música", "effect": "efeito"}
@@ -266,6 +326,8 @@ func _focus_text() -> String:
 		return _current_text()
 	var row := _rows[_cursor]
 	var is_button: bool
+	if str(row["kind"]).begins_with("o_"):
+		return "%s, botão" % _current_text() if _detail.is_button(row) else _current_text()
 	match row["kind"]:
 		"header":
 			is_button = false
@@ -279,6 +341,8 @@ func _focus_text() -> String:
 
 
 func _title() -> String:
+	if _open_id != "":
+		return _detail.title()
 	return "Cenas da mesa" if _scenes_view else "Cena: %s" % _active()["name"]
 
 
@@ -327,6 +391,11 @@ func _on_zone_focus() -> void:
 
 
 func _on_key(key: InputEventKey) -> void:
+	if key.ctrl_pressed and not key.alt_pressed and not key.meta_pressed and (key.keycode == KEY_UP or key.keycode == KEY_DOWN):
+		if _mode == "browse" and _open_id == "" and not _scenes_view:
+			_jump_section(-1 if key.keycode == KEY_UP else 1)
+			_zone.accept_event()
+		return
 	if key.alt_pressed or key.meta_pressed or key.ctrl_pressed:
 		return
 	var handled := false
@@ -334,12 +403,27 @@ func _on_key(key: InputEventKey) -> void:
 		handled = _choice_key(key)
 	elif _mode == "grid":
 		handled = _grid_key(key)
+	elif _open_id != "":
+		handled = _open_key(key)
 	elif _scenes_view:
 		handled = _scenes_key(key)
 	else:
 		handled = _cards_key(key)
 	if handled:
 		_zone.accept_event()
+
+
+## Control mais cima ou baixo: vai ao início da seção anterior ou seguinte (os soltos e cada zona).
+func _jump_section(direction: int) -> void:
+	var target := _cursor
+	while true:
+		target += direction
+		if target < 0 or target >= _rows.size():
+			Sfx.play("edge")
+			return
+		if _rows[target]["kind"] == "header" or _rows[target]["kind"] == "zone":
+			break
+	_go_to(target)
 
 
 func _navigate(key: InputEventKey) -> bool:
@@ -418,7 +502,13 @@ func _cards_key(key: InputEventKey) -> bool:
 			_activate(row)
 		KEY_LEFT, KEY_RIGHT:
 			if not key.echo and row.get("kind", "") == "card":
-				_turn_clock(row, -1 if key.keycode == KEY_LEFT else 1)
+				_nudge_card(row, (-1 if key.keycode == KEY_LEFT else 1) * (5 if key.shift_pressed else 1))
+		KEY_R:
+			if not key.echo and row.get("kind", "") == "card":
+				_reset_timer(row)
+		KEY_E:
+			if not key.echo and row.get("kind", "") == "card":
+				_edit_definition(row)
 		KEY_P:
 			if not key.echo and row.get("kind", "") == "card":
 				_place_card(row)
@@ -430,6 +520,25 @@ func _cards_key(key: InputEventKey) -> bool:
 		_:
 			return false
 	return true
+
+
+## Dentro de um card aberto: navegação e Escape são daqui, o resto é do CardDetail.
+func _open_key(key: InputEventKey) -> bool:
+	if _navigate(key):
+		return true
+	var row := _rows[_cursor] if not _rows.is_empty() else {}
+	if key.keycode == KEY_ESCAPE:
+		_follow = _open_id
+		_open_id = ""
+		_cursor = 0
+		_rebuild()
+		Sfx.play("close_input")
+		Speech.say("%s. %s" % [_title(), _current_text()], true)
+		return true
+	if key.keycode == KEY_H:
+		Speech.say(_detail.help(), true)
+		return true
+	return _detail.key(key, row)
 
 
 func _scenes_key(key: InputEventKey) -> bool:
@@ -529,19 +638,40 @@ func _confirm_remove_card(row: Dictionary) -> void:
 	)
 
 
+## Abre o card para ler por dentro, linha a linha, ou para agir (votar, marcar, passar o turno).
+func _open_card(card: Dictionary) -> void:
+	_open_id = str(card["id"])
+	_cursor = 0
+	_rebuild()
+	Sfx.play("open_input")
+	Speech.say("%s. %s" % [_title(), _current_text()], true)
+
+
 func _activate(row: Dictionary) -> void:
 	match row["kind"]:
 		"new_card":
 			_new_card()
 		"card":
+			var card: Dictionary = _active()["cards"][row["index"]]
+			var card_kind := str(card.get("kind", "note"))
+			# Ler e votar não dependem de poder editar.
+			if card_kind in ["note", "image", "turns", "poll", "checklist"]:
+				_open_card(card)
+				return
 			if not _can_edit():
 				Speech.say(_row_text(row), true)
 				return
-			var card: Dictionary = _active()["cards"][row["index"]]
-			if card.get("kind", "note") == "clock":
-				_edit_clock(card)
-			else:
-				_edit_card(str(card["id"]), str(card["title"]), str(card["text"]))
+			match card_kind:
+				"clock":
+					_edit_clock(card)
+				"counter":
+					_ask_counter_value(card)
+				"timer", "stopwatch":
+					_toggle_timer(card)
+				"table":
+					_roll_table(card)
+				_:
+					_edit_card(str(card["id"]), str(card["title"]), str(card["text"]))
 		"info":
 			if _is_host():
 				_begin_edit("Descrição da cena", str(_active().get("description", "")), func(text: String) -> void:
@@ -560,8 +690,8 @@ func _activate(row: Dictionary) -> void:
 						_op({"type": "scene:background", "sceneId": _active()["id"], "mediaId": media_id})))
 		"grid":
 			var grid: Dictionary = _active()["grid"]
-			_begin_edit("Colunas do grid, de 1 a 24", str(grid["cols"]), func(cols: String) -> void:
-				_begin_edit("Linhas do grid, de 1 a 16", str(grid["rows"]), func(rows: String) -> void:
+			_begin_number("Colunas do grid, de 1 a 24", str(grid["cols"]), func(cols: String) -> void:
+				_begin_number("Linhas do grid, de 1 a 16", str(grid["rows"]), func(rows: String) -> void:
 					if cols.is_valid_int() and rows.is_valid_int():
 						_op({"type": "scene:grid", "sceneId": _active()["id"], "cols": int(cols), "rows": int(rows)})
 					else:
@@ -576,22 +706,186 @@ func _activate(row: Dictionary) -> void:
 			_edit_zone({})
 
 
-## Nota, imagem ou relógio.
+## Nota, imagem, relógio, contador, temporizador, cronômetro ou tabela aleatória.
 func _new_card() -> void:
 	_begin_choice("Que tipo de card?", [
 		{"label": "Nota, título e texto", "value": "note"},
 		{"label": "Imagem, escolhida num arquivo", "value": "image"},
 		{"label": "Relógio, com segmentos para preencher", "value": "clock"},
+		{"label": "Contador, um número com mínimo e máximo", "value": "counter"},
+		{"label": "Temporizador, conta para baixo", "value": "timer"},
+		{"label": "Cronômetro, conta para cima", "value": "stopwatch"},
+		{"label": "Tabela aleatória, sorteia uma entrada", "value": "table"},
+		{"label": "Ordem de turnos, manual, iniciativa ou pipoca", "value": "turns"},
+		{"label": "Votação, com opções e resultado no fim", "value": "poll"},
+		{"label": "Lista de verificação, itens para marcar", "value": "checklist"},
 	], _start_card)
 
 
 func _start_card(kind: String) -> void:
-	if kind == "image":
-		_pick_image(_new_image_card)
-	elif kind == "clock":
-		_begin_edit("Título do relógio", "", _new_clock_card)
-	else:
-		_edit_card("", "", "")
+	match kind:
+		"image":
+			_pick_image(_new_image_card)
+		"clock":
+			_begin_edit("Título do relógio", "", _new_clock_card)
+		"counter":
+			_begin_edit("Título do contador", "", _new_counter_card)
+		"timer":
+			_begin_edit("Título do temporizador", "", _new_timer_card)
+		"stopwatch":
+			_begin_edit("Título do cronômetro", "", func(title: String) -> void:
+				if not title.strip_edges().is_empty():
+					_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "stopwatch"}))
+		"table":
+			_begin_edit("Título da tabela", "", _new_table_card)
+		"turns", "poll", "checklist":
+			_begin_edit("Título do card", "", func(title: String) -> void:
+				if not title.strip_edges().is_empty():
+					_detail.create(kind, title))
+		_:
+			_edit_card("", "", "")
+
+
+func _new_counter_card(title: String) -> void:
+	if title.strip_edges().is_empty():
+		return
+	_begin_number("Valor máximo, de 1 a 999", "10", func(maximum: String) -> void:
+		_begin_number("Valor inicial", "0", func(start: String) -> void:
+			_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "counter",
+				"min": 0, "max": int(maximum) if maximum.is_valid_int() else 10, "value": int(start) if start.is_valid_int() else 0})))
+
+
+func _new_timer_card(title: String) -> void:
+	if title.strip_edges().is_empty():
+		return
+	_begin_duration(DURATION_PROMPT, "5", func(text: String) -> void:
+		var seconds := _parse_duration(text)
+		if seconds <= 0:
+			Sfx.play("error")
+			Speech.say("Duração inválida.", true)
+			return
+		_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "timer", "duration": seconds}))
+
+
+func _new_table_card(title: String) -> void:
+	if title.strip_edges().is_empty():
+		return
+	_begin_edit(TABLE_PROMPT, "", func(text: String) -> void:
+		_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "table", "entries": text.split("\n")}), true)
+
+
+## "2:30" são dois minutos e meio; só "5" são cinco minutos.
+func _parse_duration(text: String) -> int:
+	var clean := text.strip_edges()
+	if clean.contains(":"):
+		var parts := clean.split(":")
+		if parts.size() == 2 and parts[0].is_valid_int() and parts[1].is_valid_int():
+			return int(parts[0]) * 60 + int(parts[1])
+		return 0
+	return int(float(clean) * 60.0) if clean.is_valid_float() else 0
+
+
+func _elapsed(timer: Dictionary) -> float:
+	var seconds := float(timer["base"])
+	if timer["running"] and timer["startedAt"] != null:
+		seconds += maxf(0.0, (_client.server_ms() - float(timer["startedAt"])) / 1000.0)
+	return seconds
+
+
+## "1 minuto e 30 segundos", para a fala.
+func _spoken_time(seconds: float) -> String:
+	var total := int(ceil(maxf(0.0, seconds)))
+	var hours := total / 3600
+	var minutes := (total % 3600) / 60
+	var secs := total % 60
+	var parts: Array = []
+	if hours > 0:
+		parts.append(_plural(hours, "hora", "horas"))
+	if minutes > 0:
+		parts.append(_plural(minutes, "minuto", "minutos"))
+	if secs > 0 or parts.is_empty():
+		parts.append(_plural(secs, "segundo", "segundos"))
+	return " e ".join(parts) if parts.size() <= 2 else "%s, %s e %s" % [parts[0], parts[1], parts[2]]
+
+
+func _timer_text(card: Dictionary) -> String:
+	var timer: Dictionary = card["timer"]
+	var elapsed := _elapsed(timer)
+	if timer["mode"] == "up":
+		return "Cronômetro, %s, %s, %s" % [card["title"], _spoken_time(elapsed), "rodando" if timer["running"] else "parado"]
+	var left := float(timer["duration"]) - elapsed
+	if left <= 0.0:
+		return "Temporizador, %s, esgotado" % card["title"]
+	if timer["running"]:
+		return "Temporizador, %s, faltam %s, rodando" % [card["title"], _spoken_time(left)]
+	return "Temporizador, %s, %s%s" % [card["title"], _spoken_time(left), "" if elapsed <= 0.0 else ", pausado"]
+
+
+func _toggle_timer(card: Dictionary) -> void:
+	var timer: Dictionary = card["timer"]
+	_op({"type": "card:timer", "cardId": card["id"], "action": "pause" if timer["running"] else "start"})
+
+
+func _reset_timer(row: Dictionary) -> void:
+	var card: Dictionary = _active()["cards"][row["index"]]
+	if card.get("timer") == null:
+		return
+	if not _can_edit():
+		Sfx.play("error")
+		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
+		return
+	Sfx.play("tick", 0.8)
+	_op({"type": "card:timer", "cardId": card["id"], "action": "reset"})
+
+
+func _roll_table(card: Dictionary) -> void:
+	Sfx.play("tick", 1.1)
+	_op({"type": "card:roll", "cardId": card["id"]})
+
+
+func _ask_counter_value(card: Dictionary) -> void:
+	var counter: Dictionary = card["counter"]
+	_begin_signed("Novo valor, de %d a %d" % [int(counter["min"]), int(counter["max"])], str(int(counter["value"])), func(text: String) -> void:
+		if text.strip_edges().is_valid_int():
+			_op({"type": "card:counter", "cardId": card["id"], "value": int(text)})
+		else:
+			Sfx.play("error")
+			Speech.say("Use um número.", true))
+
+
+## E: edita o que define o card (título e, conforme o tipo, o resto).
+func _edit_definition(row: Dictionary) -> void:
+	if not _can_edit():
+		Sfx.play("error")
+		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
+		return
+	var card: Dictionary = _active()["cards"][row["index"]]
+	var cid := str(card["id"])
+	var text := str(card["text"])
+	match str(card.get("kind", "note")):
+		"clock":
+			_edit_clock(card)
+		"counter":
+			var counter: Dictionary = card["counter"]
+			_begin_edit("Título do contador", str(card["title"]), func(title: String) -> void:
+				_begin_signed("Valor mínimo", str(int(counter["min"])), func(low: String) -> void:
+					_begin_signed("Valor máximo", str(int(counter["max"])), func(high: String) -> void:
+						_op({"type": "card:edit", "cardId": cid, "title": title, "text": text,
+							"min": int(low) if low.is_valid_int() else int(counter["min"]),
+							"max": int(high) if high.is_valid_int() else int(counter["max"])}))))
+		"timer":
+			var timer: Dictionary = card["timer"]
+			_begin_edit("Título do temporizador", str(card["title"]), func(title: String) -> void:
+				_begin_duration(DURATION_PROMPT, "%d:%02d" % [int(timer["duration"]) / 60, int(timer["duration"]) % 60], func(span: String) -> void:
+					var seconds := _parse_duration(span)
+					_op({"type": "card:edit", "cardId": cid, "title": title, "text": text, "duration": seconds if seconds > 0 else int(timer["duration"])})))
+		"table":
+			var entries: Array = card["table"]["entries"]
+			_begin_edit("Título da tabela", str(card["title"]), func(title: String) -> void:
+				_begin_edit(TABLE_PROMPT, "\n".join(entries), func(lines: String) -> void:
+					_op({"type": "card:edit", "cardId": cid, "title": title, "text": text, "entries": lines.split("\n")}), true))
+		_:
+			_edit_card(cid, str(card["title"]), text)
 
 
 func _new_image_card(media_id: String) -> void:
@@ -623,13 +917,23 @@ func _edit_clock(card: Dictionary) -> void:
 			_op({"type": "card:edit", "cardId": card["id"], "title": title, "text": str(card["text"]), "segments": segments})))
 
 
-func _turn_clock(row: Dictionary, delta: int) -> void:
+func _nudge_card(row: Dictionary, delta: int) -> void:
 	var card: Dictionary = _active()["cards"][row["index"]]
-	if card.get("kind", "note") != "clock":
+	var kind := str(card.get("kind", "note"))
+	if kind != "clock" and kind != "counter":
 		return
 	if not _can_edit():
 		Sfx.play("error")
 		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
+		return
+	if kind == "counter":
+		var counter: Dictionary = card["counter"]
+		var value := clampi(int(counter["value"]) + delta, int(counter["min"]), int(counter["max"]))
+		if value == int(counter["value"]):
+			Sfx.play("edge")
+			return
+		Sfx.play("tick", 0.8 + 0.5 * float(value - int(counter["min"])) / maxf(1.0, float(counter["max"] - counter["min"])))
+		_op({"type": "card:counter", "cardId": card["id"], "value": value})
 		return
 	var clock: Dictionary = card["clock"]
 	var target := clampi(int(clock["filled"]) + delta, 0, int(clock["segments"]))
@@ -848,6 +1152,22 @@ func _choice_key(key: InputEventKey) -> bool:
 	return true
 
 
+## Campos de número: só aceitam dígitos (os com sinal também um menos) ou, para durações, dois pontos.
+func _begin_number(label: String, initial: String, done: Callable) -> void:
+	_next_kind = "uint"
+	_begin_edit(label, initial, done)
+
+
+func _begin_signed(label: String, initial: String, done: Callable) -> void:
+	_next_kind = "int"
+	_begin_edit(label, initial, done)
+
+
+func _begin_duration(label: String, initial: String, done: Callable) -> void:
+	_next_kind = "duration"
+	_begin_edit(label, initial, done)
+
+
 func _begin_edit(label: String, initial: String, done: Callable, multiline: bool = false) -> void:
 	_mode = "edit"
 	_edit_done = done
@@ -860,6 +1180,8 @@ func _begin_edit(label: String, initial: String, done: Callable, multiline: bool
 		_area.set_caret_column(_area.get_line(_area.get_line_count() - 1).length())
 	else:
 		_edit.setup(label, "Enter confirma, Escape cancela.")
+		_edit.kind = _next_kind
+		_next_kind = "text"
 		_edit.text = initial
 		_edit.caret_column = initial.length()
 		_edit.visible = true

@@ -1,4 +1,4 @@
-extends VBoxContainer
+﻿extends VBoxContainer
 ## Região "Ficha": fichas da mesa e a ficha aberta, tudo por teclado.
 ##
 ## Lista de fichas:  Setas navegam, Enter abre ou cria, Delete exclui.
@@ -52,6 +52,7 @@ var _client: Node
 var _you_name := ""
 var _zone: PanelContainer
 var _view: RichTextLabel
+var _next_kind := "text"  # tipo de digitação do próximo campo de uma linha
 var _edit: LineEdit
 var _area: TextEdit
 
@@ -1166,6 +1167,7 @@ func _activate_field(field: Dictionary) -> void:
 	var value: Variant = _value(field)
 	match field["type"]:
 		"number":
+			_next_kind = "int"
 			_begin_edit(
 				str(field["label"]),
 				str(int(value)),
@@ -1371,6 +1373,8 @@ func _begin_edit(label: String, initial: String, done: Callable, multiline: bool
 		_area.set_caret_column(_area.get_line(_area.get_line_count() - 1).length())
 	else:
 		_edit.setup(label, "Enter confirma, Escape cancela.")
+		_edit.kind = _next_kind
+		_next_kind = "text"
 		_edit.text = initial
 		_edit.caret_column = initial.length()
 		_edit.visible = true

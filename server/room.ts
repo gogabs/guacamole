@@ -1,4 +1,4 @@
-import { runChatInput } from "../core/commands.ts";
+﻿import { runChatInput } from "../core/commands.ts";
 import { findCompendium, findCompendiumItem, OracleError, rollOracle } from "../core/compendium/mod.ts";
 import { describeRoll, type IronswornRoll } from "../core/dice.ts";
 import type {
@@ -308,6 +308,9 @@ export function handleClientMessage(
         message.op,
         player.role === "host",
         (id, kind) => room.media.some((m) => m.id === id && m.kind === kind),
+        Date.now(),
+        rng,
+        player.name,
       );
       room.scene = result.state;
       const text = result.message(player.name);

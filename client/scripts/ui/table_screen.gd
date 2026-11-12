@@ -46,6 +46,7 @@ var _header: Label
 var _history_zone: PanelContainer
 var _log: RichTextLabel
 var _composer: LineEdit
+var _focus_before_input: Control
 var _footer: Label
 var _sheets: Control
 var _scene: Control
@@ -368,6 +369,10 @@ func _players_summary() -> String:
 # --- Campo de mensagem --------------------------------------------------------------------
 
 func _open_input(prefill: String) -> void:
+	# O foco volta para onde estava, e não sempre para a lista de fichas.
+	var before := get_viewport().gui_get_focus_owner()
+	if before != _composer:
+		_focus_before_input = before
 	_composer.text = prefill
 	_composer.caret_column = prefill.length()
 	_composer.grab_focus()
@@ -376,7 +381,12 @@ func _open_input(prefill: String) -> void:
 
 func _close_input() -> void:
 	_composer.text = ""
-	_sheets.focus_zone().grab_focus()
+	var back := _focus_before_input
+	_focus_before_input = null
+	if back != null and is_instance_valid(back) and back.is_visible_in_tree() and back.focus_mode != Control.FOCUS_NONE:
+		back.grab_focus()
+	else:
+		_sheets.focus_zone().grab_focus()
 
 
 func _on_submit(text: String) -> void:

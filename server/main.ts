@@ -1,4 +1,4 @@
-import { compendiumCatalog } from "../core/compendium/mod.ts";
+﻿import { compendiumCatalog } from "../core/compendium/mod.ts";
 import {
   type ChatEntry,
   type ClientMessage,
@@ -82,7 +82,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   /** Cada jogador recebe a cena sem os cards ocultos; só o anfitrião vê tudo. */
   const broadcastScene = (room: RoomRecord) => {
     for (const [socket, player] of connections.get(room.id) ?? []) {
-      send(socket, { type: "scene:sync", scene: sceneFor(room.scene, player.role === "host") });
+      send(socket, { type: "scene:sync", scene: sceneFor(room.scene, player.role === "host", player.name) });
     }
   };
 
@@ -193,7 +193,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         history: room.history.slice(-WELCOME_HISTORY),
         templates: [...BUILT_IN_TEMPLATES],
         characters: room.characters,
-        scene: sceneFor(room.scene, player.role === "host"),
+        scene: sceneFor(room.scene, player.role === "host", player.name),
         serverTime: Date.now(),
         catalog: compendiumCatalog(),
         compendiums: room.compendiums,

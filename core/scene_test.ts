@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+﻿import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { applySceneOp, createSceneState, normalizeSceneState, SceneError, sceneFor } from "./scene.ts";
 
 Deno.test("cena: cards podem ser criados, editados, movidos e removidos", () => {
@@ -203,4 +203,175 @@ Deno.test("cena: áudio toca, para, dispara efeitos e só uma música por vez", 
   assertEquals(cards().some((c) => c.audio?.playing), false);
   state = applySceneOp(state, { type: "audio:play", cardId: "tema" }, true, known, 5000).state;
   assertEquals(normalizeSceneState(JSON.parse(JSON.stringify(state))).scenes[0].cards[1].audio?.playing, false);
+});
+
+Deno.test("cena: contador, temporizador, cronômetro e tabela", () => {
+  let state = createSceneState();
+  const add = (op: Record<string, unknown>) => {
+    state = applySceneOp(state, { type: "card:add", text: "", ...op } as never, false).state;
+  };
+  const card = (id: string) => state.scenes[0].cards.find((c) => c.id === id)!;
+
+  add({ id: "v", title: "Vidas", kind: "counter", value: 3, min: 0, max: 5 });
+  assertEquals(card("v").counter, { value: 3, min: 0, max: 5 });
+  state = applySceneOp(state, { type: "card:counter", cardId: "v", value: 9 }, false).state;
+  assertEquals(card("v").counter?.value, 5);
+  const low = applySceneOp(state, { type: "card:counter", cardId: "v", value: -4 }, false);
+  assertEquals([low.state.scenes[0].cards[0].counter?.value, low.message("Ana")], [0, "Ana pôs Vidas em 0."]);
+  state = applySceneOp(state, { type: "card:edit", cardId: "v", title: "Vidas", text: "", max: 3 }, false).state;
+  assertEquals(card("v").counter, { value: 3, min: 0, max: 3 });
+
+  add({ id: "t", title: "Ritual", kind: "timer", duration: 120 });
+  assertEquals(card("t").timer, { mode: "down", duration: 120, running: false, startedAt: null, base: 0 });
+  state = applySceneOp(state, { type: "card:timer", cardId: "t", action: "start" }, false, undefined, 1000).state;
+  assertEquals([card("t").timer?.running, card("t").timer?.startedAt], [true, 1000]);
+  assertThrows(() => applySceneOp(state, { type: "card:timer", cardId: "t", action: "start" }, false), SceneError);
+  const paused = applySceneOp(state, { type: "card:timer", cardId: "t", action: "pause" }, false, undefined, 31000);
+  assertEquals([paused.state.scenes[0].cards[1].timer?.base, paused.message("Ana")], [30, "Ana pausou o temporizador Ritual."]);
+  assertThrows(() => applySceneOp(paused.state, { type: "card:timer", cardId: "t", action: "pause" }, false), SceneError);
+  const zero = applySceneOp(paused.state, { type: "card:timer", cardId: "t", action: "reset" }, false);
+  assertEquals(zero.state.scenes[0].cards[1].timer?.base, 0);
+  // Um temporizador que acabou recomeça do zero ao iniciar.
+  const done = { ...paused.state, scenes: [{ ...paused.state.scenes[0], cards: paused.state.scenes[0].cards.map((c) => c.id === "t" ? { ...c, timer: { ...c.timer!, base: 200 } } : c) }] };
+  assertEquals(applySceneOp(done, { type: "card:timer", cardId: "t", action: "start" }, false, undefined, 5).state.scenes[0].cards[1].timer?.base, 0);
+
+  add({ id: "c", title: "Tempo de cena", kind: "stopwatch" });
+  assertEquals(card("c").timer?.mode, "up");
+  // A duração só vale para o temporizador; no cronômetro é ignorada.
+  state = applySceneOp(state, { type: "card:edit", cardId: "c", title: "Tempo", text: "", duration: 10 }, false).state;
+  assertEquals(card("c").timer?.duration, 0);
+
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "x", title: "Vazia", text: "", kind: "table", entries: ["só uma"] }, false), SceneError);
+  add({ id: "tb", title: "Encontro", kind: "table", entries: ["Lobo", " ", "Bandido", "Nada"] });
+  assertEquals(card("tb").table, { entries: ["Lobo", "Bandido", "Nada"], last: null });
+  const rolled = applySceneOp(state, { type: "card:roll", cardId: "tb" }, false, undefined, 0, () => 0.5);
+  assertEquals([rolled.state.scenes[0].cards[3].table?.last, rolled.message("Ana")], [1, "Ana sorteou em Encontro: Bandido."]);
+  assertEquals(applySceneOp(state, { type: "card:roll", cardId: "tb" }, false, undefined, 0, () => 0.9999).state.scenes[0].cards[3].table?.last, 2);
+  assertThrows(() => applySceneOp(state, { type: "card:roll", cardId: "v" }, false), SceneError);
+
+  // Estado lido de disco: nada continua rodando.
+  const running = applySceneOp(state, { type: "card:timer", cardId: "c", action: "start" }, false, undefined, Date.now() - 5000).state;
+  const loaded = normalizeSceneState(JSON.parse(JSON.stringify(running))).scenes[0].cards[2].timer!;
+  assertEquals([loaded.running, loaded.startedAt, loaded.base >= 5], [false, null, true]);
+});
+
+Deno.test("turnos: manual, iniciativa e pipoca", () => {
+  let state = createSceneState();
+  const op = (o: Record<string, unknown>, isHost = true, actor = "Ana", rng = () => 0.5) => {
+    const result = applySceneOp(state, { cardId: "t", ...o } as never, isHost, undefined, 0, rng, actor);
+    state = result.state;
+    return result.message(actor);
+  };
+  const turns = () => state.scenes[0].cards[0].turns!;
+  state = applySceneOp(state, { type: "scene:editors", editors: "host" }, true).state;
+  state = applySceneOp(state, { type: "card:add", id: "t", title: "Combate", text: "", kind: "turns" }, true).state;
+  const add = (id: string, name: string, owner: string | null) => op({ type: "turns:add", entryId: id, name, owner });
+  add("a", "Ana", "Ana");
+  add("b", "Bia", "Bia");
+  add("g", "Goblin", null);
+  assertEquals(turns().entries.map((e) => e.id), ["a", "b", "g"]);
+
+  // Manual: reordena na mão e passa em sequência; a rodada vira quando volta ao primeiro.
+  op({ type: "turns:move", entryId: "g", direction: -1 });
+  assertEquals(turns().entries.map((e) => e.id), ["a", "g", "b"]);
+  assertThrows(() => op({ type: "turns:move", entryId: "a", direction: -1 }), SceneError);
+  assertEquals(op({ type: "turns:next" }), "Turno de Ana.");
+  assertEquals(op({ type: "turns:next" }), "Turno de Goblin.");
+  assertThrows(() => op({ type: "turns:next" }, false, "Bia"), SceneError); // Bia não está na vez
+  assertEquals(op({ type: "turns:next" }, true), "Turno de Bia.");
+  assertEquals(op({ type: "turns:next" }, false, "Bia"), "Rodada 2. Turno de Ana.");
+  assertThrows(() => op({ type: "turns:pick", entryId: "b" }), SceneError); // só no pipoca
+
+  // Iniciativa: ordena do maior ao menor, rola quem está sem valor.
+  op({ type: "turns:system", system: "initiative", count: 2, sides: 6 });
+  assertEquals([turns().current, turns().round], [null, 1]);
+  op({ type: "turns:value", entryId: "b", value: 15 });
+  op({ type: "turns:value", entryId: "a", value: 9 });
+  assertEquals(turns().entries.map((e) => e.id), ["b", "a", "g"]);
+  assertEquals(op({ type: "turns:roll" }, true, "Ana", () => 0.5), "Ana rolou a iniciativa: Goblin, 8.");
+  assertEquals(turns().entries.map((e) => e.id), ["b", "a", "g"]);
+  assertThrows(() => op({ type: "turns:roll" }), SceneError);
+  assertThrows(() => op({ type: "turns:move", entryId: "a", direction: 1 }), SceneError);
+
+  // Pipoca: quem está na vez escolhe o próximo; ao todos jogarem, a rodada recomeça.
+  op({ type: "turns:system", system: "popcorn" });
+  assertThrows(() => op({ type: "turns:pick", entryId: "a" }, false, "Ana"), SceneError); // sem vez ainda: só o anfitrião
+  assertEquals(op({ type: "turns:pick", entryId: "a" }), "Turno de Ana.");
+  assertThrows(() => op({ type: "turns:pick", entryId: "b" }, false, "Bia"), SceneError); // Bia não está na vez
+  assertThrows(() => op({ type: "turns:pick", entryId: "a" }, false, "Ana"), SceneError); // não pode a si mesma
+  assertEquals(op({ type: "turns:pick", entryId: "b" }, false, "Ana"), "Ana passou o turno para Bia.");
+  assertThrows(() => op({ type: "turns:pick", entryId: "a" }, false, "Bia"), SceneError); // Ana já jogou
+  assertEquals(op({ type: "turns:pick", entryId: "g" }, false, "Bia"), "Bia passou o turno para Goblin.");
+  assertEquals(turns().entries.every((e) => e.done), true);
+  // O Goblin é PNJ: o anfitrião escolhe por ele e a rodada recomeça.
+  assertThrows(() => op({ type: "turns:pick", entryId: "a" }, false, "Ana"), SceneError);
+  assertEquals(op({ type: "turns:pick", entryId: "a" }, true, "Ana"), "Todos jogaram. Rodada 2. Ana passou o turno para Ana.");
+  assertEquals([turns().round, turns().current, turns().entries.map((e) => e.done)], [2, "a", [false, true, false]]);
+
+  op({ type: "turns:remove", entryId: "a" });
+  assertEquals(turns().current, null);
+  op({ type: "turns:reset" });
+  assertEquals([turns().round, turns().entries.length], [1, 2]);
+});
+
+Deno.test("votação: votos secretos enquanto aberta, resultado ao encerrar", () => {
+  let state = createSceneState();
+  const run = (o: Record<string, unknown>, isHost: boolean, actor: string) => {
+    const result = applySceneOp(state, { cardId: "p", ...o } as never, isHost, undefined, 0, undefined, actor);
+    state = result.state;
+    return result.message(actor);
+  };
+  state = applySceneOp(state, { type: "card:add", id: "p", title: "Onde vamos?", text: "", kind: "poll", entries: ["Norte", "Sul", " "], anonymous: false }, true).state;
+  const poll = () => state.scenes[0].cards[0].poll!;
+  assertEquals(poll().options.map((o) => o.text), ["Norte", "Sul"]);
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "q", title: "x", text: "", kind: "poll", entries: ["só"] }, true), SceneError);
+
+  assertEquals(run({ type: "poll:vote", optionId: "o1" }, false, "Bia"), "Bia votou em Onde vamos?.");
+  run({ type: "poll:vote", optionId: "o2" }, false, "Caio");
+  run({ type: "poll:vote", optionId: "o1" }, true, "Ana");
+  run({ type: "poll:vote", optionId: "o2" }, false, "Caio"); // trocar o voto não conta duas vezes
+  assertEquals(poll().total, 3);
+  assertThrows(() => run({ type: "poll:vote", optionId: "o9" }, false, "Bia"), SceneError);
+  assertThrows(() => run({ type: "poll:state", open: false }, false, "Bia"), SceneError);
+
+  // Aberta: cada um vê só o seu voto e o total; nem o anfitrião vê os dos outros.
+  const bia = sceneFor(state, false, "Bia").scenes[0].cards[0].poll!;
+  assertEquals([bia.votes, bia.total], [{ o1: undefined, Bia: "o1" }.Bia ? { Bia: "o1" } : {}, 3]);
+  assertEquals(sceneFor(state, true, "Ana").scenes[0].cards[0].poll!.votes, { Ana: "o1" });
+  assertEquals(sceneFor(state, false, "Dani").scenes[0].cards[0].poll!.votes, {});
+
+  const closed = run({ type: "poll:state", open: false }, true, "Ana");
+  assertEquals(closed, "Votação Onde vamos? encerrada, 3 votos. Norte, 2 votos; Sul, 1 voto.");
+  assertThrows(() => run({ type: "poll:vote", optionId: "o1" }, false, "Dani"), SceneError);
+  assertEquals(Object.keys(sceneFor(state, false, "Dani").scenes[0].cards[0].poll!.votes).sort(), ["Ana", "Bia", "Caio"]);
+
+  // Anônima: o resultado aparece sem nomes.
+  state = applySceneOp(state, { type: "card:add", id: "s", title: "Segredo", text: "", kind: "poll", entries: ["Sim", "Não"], anonymous: true }, true).state;
+  state = applySceneOp(state, { type: "poll:vote", cardId: "s", optionId: "o1" }, false, undefined, 0, undefined, "Bia").state;
+  state = applySceneOp(state, { type: "poll:state", cardId: "s", open: false }, true).state;
+  const secret = sceneFor(state, false, "Bia").scenes[0].cards[1].poll!;
+  assertEquals(Object.keys(secret.votes), ["voto 1"]);
+
+  run({ type: "poll:reset" }, true, "Ana");
+  assertEquals([poll().open, poll().total], [true, 0]);
+});
+
+Deno.test("lista de verificação: marcar, editar e remover itens", () => {
+  let state = createSceneState();
+  state = applySceneOp(state, { type: "card:add", id: "l", title: "Suprimentos", text: "", kind: "checklist", entries: ["Água", "Corda"] }, true).state;
+  const items = () => state.scenes[0].cards[0].checklist!.items;
+  assertEquals(items().map((i) => i.text), ["Água", "Corda"]);
+  const toggled = applySceneOp(state, { type: "check:toggle", cardId: "l", itemId: "i1" }, false);
+  assertEquals([toggled.state.scenes[0].cards[0].checklist!.items[0].done, toggled.message("Ana")], [true, "Ana marcou Água em Suprimentos."]);
+  state = toggled.state;
+  assertEquals(applySceneOp(state, { type: "check:toggle", cardId: "l", itemId: "i1" }, false).message("Ana"), "Ana desmarcou Água em Suprimentos.");
+  state = applySceneOp(state, { type: "check:add", cardId: "l", itemId: "x", text: "Tocha" }, false).state;
+  state = applySceneOp(state, { type: "check:edit", cardId: "l", itemId: "x", text: "Tochas" }, false).state;
+  state = applySceneOp(state, { type: "check:remove", cardId: "l", itemId: "i2" }, false).state;
+  assertEquals(items().map((i) => i.text), ["Água", "Tochas"]);
+  assertThrows(() => applySceneOp(state, { type: "check:add", cardId: "l", itemId: "y", text: " " }, false), SceneError);
+  state = applySceneOp(state, { type: "scene:editors", editors: "host" }, true).state;
+  assertThrows(() => applySceneOp(state, { type: "check:toggle", cardId: "l", itemId: "i1" }, false), SceneError);
+  // Estado guardado volta intacto.
+  assertEquals(normalizeSceneState(JSON.parse(JSON.stringify(state))).scenes[0].cards[0].checklist, state.scenes[0].cards[0].checklist);
 });

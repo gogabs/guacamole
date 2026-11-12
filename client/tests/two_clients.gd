@@ -351,8 +351,13 @@ func _run() -> void:
 	_check(await _wait(func() -> bool: return (ana.scene["scenes"][0]["cards"] as Array).size() == 1), "o card chega em Ana")
 	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("adicionou o card Taverna")), "o histórico anuncia o card")
 	await _key(KEY_ENTER, KEY_ENTER)
-	_check(scene_panel._edit.visible and scene_panel._edit.text == "Taverna", "Enter num card edita o título atual")
+	_check(scene_panel._open_id != "" and scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["o_title", "o_line", "o_line"], "Enter num card de texto o abre, uma linha por linha")
+	_check(scene_panel._row_text(scene_panel._rows[1]) == "Fumaça." and scene_panel._row_text(scene_panel._rows[2]) == "Canecas.", "as linhas do texto são lidas separadas")
+	await _key(KEY_E, KEY_E)
+	_check(scene_panel._edit.visible and scene_panel._edit.text == "Taverna", "E edita o título atual")
 	scene_panel._edit.cancelled.emit()
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	_check(scene_panel._open_id == "", "Escape fecha o card")
 	await _key(KEY_S, KEY_S)
 	_check(not scene_panel._scenes_view, "S não abre a lista de cenas para quem não é anfitrião")
 	ana.scene_op({"type": "scene:create", "id": "s2", "name": "Duelo"})
@@ -461,6 +466,129 @@ func _run() -> void:
 	await _key(KEY_1, KEY_1)
 	scene_panel._zone.grab_focus()
 	DirAccess.remove_absolute(wav_path)
+
+	# Contador, temporizador e tabela: Ana cria, Caio usa pelo teclado.
+	ana.scene_op({"type": "card:add", "id": "vidas", "title": "Vidas", "text": "", "kind": "counter", "min": 0, "max": 5, "value": 3})
+	ana.scene_op({"type": "card:add", "id": "prazo", "title": "Prazo", "text": "", "kind": "timer", "duration": 1})
+	ana.scene_op({"type": "card:add", "id": "enc", "title": "Encontro", "text": "", "kind": "table", "entries": ["Lobo", "Bandido", "Nada"]})
+	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).size() == 6), "Caio recebe contador, temporizador e tabela")
+	_on_card(scene_panel, "vidas")
+	_check(scene_panel._current_text() == "Contador, Vidas: 3, de 0 a 5", "o contador fala valor e limites")
+	await _key(KEY_RIGHT, KEY_RIGHT)
+	_check(await _wait(func() -> bool: return _card_of(ana, "vidas")["counter"]["value"] == 4), "Direita sobe o contador para todos")
+	_on_card(scene_panel, "prazo")
+	_check(scene_panel._current_text() == "Temporizador, Prazo, 1 segundo", "o temporizador parado fala o que falta")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return _card_of(ana, "prazo")["timer"]["running"]), "Enter inicia o temporizador para todos")
+	_check(await _wait(func() -> bool: return scene_panel._ended.size() > 0, 5.0), "o fim do temporizador é avisado")
+	_check(scene_panel._current_text() == "Temporizador, Prazo, esgotado", "e a lista diz que esgotou")
+	await _key(KEY_R, KEY_R)
+	_check(await _wait(func() -> bool: return not _card_of(ana, "prazo")["timer"]["running"] and _card_of(ana, "prazo")["timer"]["base"] == 0), "R zera o temporizador")
+	_on_card(scene_panel, "enc")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return _card_of(ana, "enc")["table"]["last"] != null), "Enter sorteia na tabela")
+	_check(scene_panel._current_text().contains("último sorteio"), "a tabela fala o último sorteio")
+	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("sorteou em Encontro")), "o sorteio vai para o histórico")
+
+	# Ordem de turnos (pipoca), votação e lista de verificação: abrir o card e agir por dentro.
+	ana.scene_op({"type": "card:add", "id": "cmb", "title": "Combate", "text": "", "kind": "turns", "system": "popcorn"})
+	ana.scene_op({"type": "card:add", "id": "voto", "title": "Onde vamos", "text": "", "kind": "poll", "entries": ["Norte", "Sul"], "anonymous": false})
+	ana.scene_op({"type": "card:add", "id": "lista", "title": "Suprimentos", "text": "", "kind": "checklist", "entries": ["Água", "Corda"]})
+	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).size() == 9), "Caio recebe turnos, votação e lista")
+	ana.scene_op({"type": "turns:add", "cardId": "cmb", "entryId": "e1", "name": "Ana", "owner": "Ana"})
+	ana.scene_op({"type": "turns:add", "cardId": "cmb", "entryId": "e2", "name": "Caio", "owner": "Caio"})
+	ana.scene_op({"type": "turns:add", "cardId": "cmb", "entryId": "e3", "name": "Goblin"})
+	_check(await _wait(func() -> bool: return (_card_of(table._client, "cmb")["turns"]["entries"] as Array).size() == 3), "os três participantes chegam")
+	_on_card(scene_panel, "cmb")
+	_check(scene_panel._current_text().begins_with("Ordem de turnos, Combate, pipoca"), "o card de turnos fala o sistema")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(scene_panel._open_id == "cmb", "Enter abre o card de turnos")
+	_check(scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]).slice(0, 5) == ["o_title", "o_entry", "o_entry", "o_entry", "o_add_entry"], "dentro: os participantes e os botões")
+	_on_detail_row(scene_panel, "o_entry", 2)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(_card_of(ana, "cmb")["turns"]["current"] == null, "sem ninguém na vez, só o anfitrião escolhe o primeiro")
+	ana.scene_op({"type": "turns:pick", "cardId": "cmb", "entryId": "e2"})
+	_check(await _wait(func() -> bool: return _card_of(table._client, "cmb")["turns"]["current"] == "e2"), "Ana (anfitriã) dá o primeiro turno a Caio")
+	_check(scene_panel._row_text(scene_panel._rows[2]) == "Caio, é a vez", "a lista diz de quem é a vez")
+	_on_detail_row(scene_panel, "o_entry", 2)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return _card_of(ana, "cmb")["turns"]["current"] == "e3"), "Caio, na vez, escolhe o Goblin pelo teclado")
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	_check(scene_panel._open_id == "" and scene_panel._rows[scene_panel._cursor]["kind"] == "card", "Escape volta aos cards")
+
+	_on_card(scene_panel, "voto")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_on_detail_row(scene_panel, "o_option", 1)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return _card_of(ana, "voto")["poll"]["total"] == 1), "Caio vota e o total chega a Ana")
+	_check((_card_of(ana, "voto")["poll"]["votes"] as Dictionary).is_empty(), "o voto de Caio não chega a Ana enquanto a votação está aberta")
+	_check(scene_panel._row_text(scene_panel._rows[2]) == "Sul, seu voto", "Caio vê o próprio voto")
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	ana.scene_op({"type": "poll:state", "cardId": "voto", "open": false})
+	_check(await _wait(func() -> bool: return not _card_of(table._client, "voto")["poll"]["open"]), "o anfitrião encerra a votação")
+	_check((_card_of(ana, "voto")["poll"]["votes"] as Dictionary).has("Caio"), "ao encerrar, todos veem os votos")
+	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("Votação Onde vamos encerrada")), "o resultado vai para o histórico")
+
+	_on_card(scene_panel, "lista")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_on_detail_row(scene_panel, "o_item", 0)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return _card_of(ana, "lista")["checklist"]["items"][0]["done"]), "Enter marca o item da lista para todos")
+	_check(scene_panel._row_text(scene_panel._rows[1]) == "Água, marcado", "o item fala marcado")
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+
+	# Control mais cima ou baixo salta entre as seções: cards soltos e cada zona.
+	scene_panel._cursor = 0
+	scene_panel._jump_section(1)
+	_check(scene_panel._rows[scene_panel._cursor]["kind"] == "header", "Control Baixo vai ao início dos cards soltos")
+	scene_panel._jump_section(1)
+	_check(scene_panel._rows[scene_panel._cursor]["kind"] == "zone", "Control Baixo seguinte vai à zona")
+	scene_panel._jump_section(-1)
+	_check(scene_panel._rows[scene_panel._cursor]["kind"] == "header", "Control Cima volta à seção anterior")
+
+	# Campos: começam a aceitar digitação na hora, mesmo reabertos em cadeia, e filtram números.
+	scene_panel._zone.grab_focus()
+	scene_panel._begin_edit("Primeiro", "ab", func(_first: String) -> void:
+		scene_panel._begin_number("Segundo", "7", func(_second: String) -> void: pass))
+	await process_frame
+	await process_frame
+	_check(scene_panel._edit.is_editing(), "o campo aberto começa em modo de edição")
+	await _key(KEY_ENTER, KEY_ENTER)
+	await process_frame
+	_check(scene_panel._edit.visible and scene_panel._edit.accessibility_name == "Segundo" and scene_panel._edit.is_editing(), "o campo reaberto em cadeia também aceita digitação")
+	await _key(KEY_UP, KEY_UP)
+	await _key(KEY_TAB, KEY_TAB)
+	_check(root.gui_get_focus_owner() == scene_panel._edit, "Tab e setas verticais não tiram o foco do campo")
+	scene_panel._edit.text = "1.5x"
+	scene_panel._edit._on_text_changed(scene_panel._edit.text)
+	_check(scene_panel._edit.text == "15", "campo de número descarta ponto e letras")
+	scene_panel._edit.text = "-3-"
+	scene_panel._edit.kind = "int"
+	scene_panel._edit._on_text_changed(scene_panel._edit.text)
+	_check(scene_panel._edit.text == "-3", "campo com sinal aceita um menos no início")
+	scene_panel._edit.kind = "duration"
+	scene_panel._edit.text = "2:3a0"
+	scene_panel._edit._on_text_changed(scene_panel._edit.text)
+	_check(scene_panel._edit.text == "2:30", "campo de duração aceita dois pontos")
+	scene_panel._edit.cancelled.emit()
+
+	# O campo de mensagem devolve o foco para onde ele estava, não sempre para as fichas.
+	scene_panel._zone.grab_focus()
+	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
+	_check(table._composer.has_focus(), "; abre o campo de mensagem a partir da cena")
+	await _key(KEY_ESCAPE, KEY_ESCAPE)
+	_check(root.gui_get_focus_owner() == scene_panel._zone, "Escape devolve o foco à região de cena")
+	audio_panel._zone.grab_focus()
+	await _key(KEY_SLASH, KEY_SEMICOLON, 59)
+	table._composer.text_submitted.emit("")
+	await process_frame
+	_check(root.gui_get_focus_owner() == audio_panel._zone, "fechar o campo pelo envio devolve o foco à região de áudio")
+	scene_panel._zone.grab_focus()
+
+	# Control Baixo, de verdade, também salta entre seções.
+	scene_panel._cursor = 0
+	await _ctrl_key(KEY_DOWN)
+	_check(scene_panel._rows[scene_panel._cursor]["kind"] == "header", "Control Baixo pelo teclado vai à primeira seção")
 
 	ana.scene_op({"type": "scene:editors", "editors": "host"})
 	_check(await _wait(func() -> bool: return table._client.scene["editors"] == "host"), "Ana restringe a edição dos cards")
@@ -724,3 +852,22 @@ func _u32(value: int) -> PackedByteArray:
 	bytes.resize(4)
 	bytes.encode_u32(0, value)
 	return bytes
+
+func _card_of(client: Node, card_id: String) -> Dictionary:
+	for card in client.scene["scenes"][1]["cards"]:
+		if card["id"] == card_id:
+			return card
+	return {}
+
+
+## Põe o cursor da região de cena no card.
+func _on_card(panel: Control, card_id: String) -> void:
+	for i in panel._rows.size():
+		if panel._rows[i]["kind"] == "card" and panel._active()["cards"][panel._rows[i]["index"]]["id"] == card_id:
+			panel._cursor = i
+
+## Põe o cursor numa linha do interior de um card aberto.
+func _on_detail_row(panel: Control, kind: String, index: int) -> void:
+	for i in panel._rows.size():
+		if panel._rows[i]["kind"] == kind and int(panel._rows[i].get("index", 0)) == index:
+			panel._cursor = i

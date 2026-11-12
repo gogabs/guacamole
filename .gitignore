@@ -13,3 +13,4 @@ data/*.tmp
 *.import
 client/addons/prismatoid/bin/
 data/media/
+client/export_presets.cfg

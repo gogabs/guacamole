@@ -1,11 +1,87 @@
+import { defaultRng, type Rng } from "./rng.ts";
+import {
+  applyChecklist,
+  applyPoll,
+  applyTurns,
+  type ChecklistOp,
+  type ChecklistSpec,
+  cleanChecklist,
+  cleanPoll,
+  cleanTurns,
+  newChecklist,
+  newPoll,
+  newTurns,
+  type PollOp,
+  pollFor,
+  type PollSpec,
+  TURN_SYSTEMS,
+  type TurnsOp,
+  type TurnsSpec,
+  type TurnSystem,
+} from "./scene_kinds.ts";
+
+export type { ChecklistSpec, PollSpec, TurnsSpec };
+
 /**
  * Cena: um fundo, um grid pequeno que só desenha zonas nomeadas e uma lista ordenada de cards.
  * Um card sem zona fica na coluna de cards soltos; com zona, aparece como token nela.
  * Uma cena fica ativa por vez na mesa.
  */
 
-export type CardKind = "note" | "image" | "clock" | "audio";
-export const CARD_KINDS: CardKind[] = ["note", "image", "clock", "audio"];
+export type CardKind =
+  | "note"
+  | "image"
+  | "clock"
+  | "audio"
+  | "counter"
+  | "timer"
+  | "stopwatch"
+  | "table"
+  | "turns"
+  | "poll"
+  | "checklist";
+export const CARD_KINDS: CardKind[] = [
+  "note",
+  "image",
+  "clock",
+  "audio",
+  "counter",
+  "timer",
+  "stopwatch",
+  "table",
+  "turns",
+  "poll",
+  "checklist",
+];
+
+/**
+ * Temporizador (conta para baixo até `duration`) ou cronômetro (conta para cima). O tempo corrido é
+ * `base` mais, se estiver rodando, o que passou desde `startedAt` no relógio do servidor.
+ */
+export interface TimerSpec {
+  mode: "down" | "up";
+  /** Segundos; 0 no cronômetro. */
+  duration: number;
+  running: boolean;
+  startedAt: number | null;
+  /** Segundos já corridos até a última pausa. */
+  base: number;
+}
+
+export interface CounterSpec {
+  value: number;
+  min: number;
+  max: number;
+}
+
+/** Tabela aleatória: o sorteio é do servidor, e o último resultado fica no card. */
+export interface TableSpec {
+  entries: string[];
+  last: number | null;
+}
+
+export const MAX_DURATION = 86400;
+export const MAX_ENTRIES = 40;
 
 /** Ambiência (loop, posicional se estiver numa zona), música (uma por vez) ou efeito (dispara e acaba). */
 export type AudioMode = "ambient" | "music" | "effect";
@@ -36,6 +112,12 @@ export interface SceneCard {
   mediaId: string | null;
   /** Só em cards de áudio. */
   audio: AudioSpec | null;
+  counter: CounterSpec | null;
+  timer: TimerSpec | null;
+  table: TableSpec | null;
+  turns: TurnsSpec | null;
+  poll: PollSpec | null;
+  checklist: ChecklistSpec | null;
   /** Só em relógios: segmentos totais e preenchidos. */
   clock: { segments: number; filled: number } | null;
   /** Zona onde o card está; `null` é a coluna de cards soltos. */
@@ -104,9 +186,39 @@ export type SceneOp =
     segments?: number;
     mode?: AudioMode;
     zoneId?: string | null;
+    /** Contador: valor inicial, mínimo e máximo. */
+    value?: number;
+    min?: number;
+    max?: number;
+    /** Temporizador, em segundos. */
+    duration?: number;
+    /** Tabela aleatória, opções da votação ou itens iniciais da lista. */
+    entries?: string[];
+    /** Ordem de turnos. */
+    system?: TurnSystem;
+    /** Votação sem nomes no resultado. */
+    anonymous?: boolean;
   }
-  /** `mediaId` e `segments` ausentes mantêm o que o card já tem. */
-  | { type: "card:edit"; cardId: string; title: string; text: string; mediaId?: string | null; segments?: number }
+  /** Campos ausentes mantêm o que o card já tem. */
+  | {
+    type: "card:edit";
+    cardId: string;
+    title: string;
+    text: string;
+    mediaId?: string | null;
+    segments?: number;
+    min?: number;
+    max?: number;
+    duration?: number;
+    entries?: string[];
+  }
+  | { type: "card:counter"; cardId: string; value: number }
+  | { type: "card:timer"; cardId: string; action: "start" | "pause" | "reset" }
+  /** Sorteia uma entrada da tabela. */
+  | { type: "card:roll"; cardId: string }
+  | ({ cardId: string } & TurnsOp)
+  | ({ cardId: string } & PollOp)
+  | ({ cardId: string } & ChecklistOp)
   | { type: "card:remove"; cardId: string }
   /** Põe o card numa zona (token) ou o solta na coluna (`zoneId: null`). */
   | { type: "card:place"; cardId: string; zoneId: string | null }
@@ -138,6 +250,25 @@ export const SCENE_OP_TYPES = [
   "card:remove",
   "card:place",
   "card:clock",
+  "card:counter",
+  "card:timer",
+  "card:roll",
+  "turns:add",
+  "turns:remove",
+  "turns:move",
+  "turns:value",
+  "turns:roll",
+  "turns:system",
+  "turns:next",
+  "turns:pick",
+  "turns:reset",
+  "poll:vote",
+  "poll:state",
+  "poll:reset",
+  "check:add",
+  "check:toggle",
+  "check:edit",
+  "check:remove",
   "audio:play",
   "audio:stop",
   "audio:stopall",
@@ -185,6 +316,9 @@ export function applySceneOp(
   hasMedia: (id: string, kind: "image" | "audio") => boolean = () => true,
   /** Relógio do servidor em ms; vira o `startedAt` de quem começa a tocar. */
   now: number = Date.now(),
+  rng: Rng = defaultRng,
+  /** Nome de quem pediu; votos e turnos dependem dele. */
+  actor: string = "",
 ): SceneResult {
   const hostOnly = () => {
     if (!isHost) throw new SceneError("Só o anfitrião faz isso.");
@@ -361,6 +495,16 @@ export function applySceneOp(
           ? { mode, volume: 80, loop: mode !== "effect", playing: false, startedAt: null, slot: null }
           : null,
         clock: kind === "clock" ? { segments: clampInt(op.segments ?? 6, 2, MAX_SEGMENTS), filled: 0 } : null,
+        counter: kind === "counter" ? cleanCounter(op.value ?? 0, op.min ?? 0, op.max ?? 10) : null,
+        timer: kind === "timer"
+          ? { mode: "down", duration: clampInt(op.duration ?? 60, 1, MAX_DURATION), running: false, startedAt: null, base: 0 }
+          : kind === "stopwatch"
+          ? { mode: "up", duration: 0, running: false, startedAt: null, base: 0 }
+          : null,
+        table: kind === "table" ? { entries: cleanEntries(op.entries), last: null } : null,
+        turns: kind === "turns" ? newTurns(TURN_SYSTEMS.includes(op.system ?? "manual") ? op.system : "manual") : null,
+        poll: kind === "poll" ? newPoll(op.entries ?? [], op.anonymous === true) : null,
+        checklist: kind === "checklist" ? newChecklist(op.entries ?? []) : null,
         zoneId: zoneIdOrNull(op.zoneId),
       };
       if (kind === "image" && !card.mediaId) throw new SceneError("Escolha a imagem do card.");
@@ -380,6 +524,13 @@ export function applySceneOp(
         const segments = clampInt(op.segments, 2, MAX_SEGMENTS);
         card.clock = { segments, filled: Math.min(old.clock.filled, segments) };
       }
+      if (old.counter) {
+        card.counter = cleanCounter(old.counter.value, op.min ?? old.counter.min, op.max ?? old.counter.max);
+      }
+      if (old.timer?.mode === "down" && op.duration !== undefined) {
+        card.timer = { ...old.timer, duration: clampInt(op.duration, 1, MAX_DURATION) };
+      }
+      if (old.table && op.entries !== undefined) card.table = { entries: cleanEntries(op.entries), last: null };
       return {
         state: withActive(active.cards.map((c) => (c.id === old.id ? card : c))),
         message: (who) => card.hidden ? "" : `${who} editou o card ${card.title}.`,
@@ -394,6 +545,98 @@ export function applySceneOp(
         state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, zoneId } : c))),
         message: (who) =>
           card.hidden ? "" : zone ? `${who} pôs ${card.title} na zona ${zone.name}.` : `${who} soltou ${card.title} da zona.`,
+      };
+    }
+    case "card:counter": {
+      cardEdit();
+      const card = cardById(op.cardId);
+      if (!card.counter) throw new SceneError("Esse card não é um contador.");
+      const value = clampInt(op.value, card.counter.min, card.counter.max);
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, counter: { ...card.counter!, value } } : c))),
+        message: (who) => card.hidden ? "" : `${who} pôs ${card.title} em ${value}.`,
+      };
+    }
+    case "card:timer": {
+      cardEdit();
+      const card = cardById(op.cardId);
+      const old = card.timer;
+      if (!old) throw new SceneError("Esse card não é um relógio de tempo.");
+      const what = old.mode === "down" ? "o temporizador" : "o cronômetro";
+      let timer: TimerSpec;
+      let verb: string;
+      if (op.action === "start") {
+        if (old.running) throw new SceneError("Já está rodando.");
+        // Um temporizador que acabou recomeça do início.
+        const base = old.mode === "down" && old.base >= old.duration ? 0 : old.base;
+        timer = { ...old, running: true, startedAt: now, base };
+        verb = "iniciou";
+      } else if (op.action === "pause") {
+        if (!old.running) throw new SceneError("Já está parado.");
+        timer = { ...old, running: false, startedAt: null, base: old.base + (now - (old.startedAt ?? now)) / 1000 };
+        verb = "pausou";
+      } else if (op.action === "reset") {
+        timer = { ...old, running: false, startedAt: null, base: 0 };
+        verb = "zerou";
+      } else {
+        throw new SceneError("Ação inválida.");
+      }
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, timer } : c))),
+        message: (who) => card.hidden ? "" : `${who} ${verb} ${what} ${card.title}.`,
+      };
+    }
+    case "turns:add":
+    case "turns:remove":
+    case "turns:move":
+    case "turns:value":
+    case "turns:roll":
+    case "turns:system":
+    case "turns:next":
+    case "turns:pick":
+    case "turns:reset": {
+      // Passar o turno e escolher o próximo dependem de quem está na vez, não de poder editar.
+      const card = cardById(op.cardId);
+      if (!card.turns) throw new SceneError("Esse card não é uma ordem de turnos.");
+      const result = applyTurns(card.turns, op, { actor, isHost, canEdit: isHost || state.editors === "everyone", rng });
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, turns: result.spec } : c))),
+        message: card.hidden ? () => "" : result.message,
+      };
+    }
+    case "poll:vote":
+    case "poll:state":
+    case "poll:reset": {
+      const card = cardById(op.cardId);
+      if (!card.poll) throw new SceneError("Esse card não é uma votação.");
+      const result = applyPoll(card.poll, op, { actor, isHost }, card.title);
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, poll: result.spec } : c))),
+        message: card.hidden ? () => "" : result.message,
+      };
+    }
+    case "check:add":
+    case "check:toggle":
+    case "check:edit":
+    case "check:remove": {
+      cardEdit();
+      const card = cardById(op.cardId);
+      if (!card.checklist) throw new SceneError("Esse card não é uma lista de verificação.");
+      const result = applyChecklist(card.checklist, op, card.title);
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, checklist: result.spec } : c))),
+        message: card.hidden ? () => "" : result.message,
+      };
+    }
+    case "card:roll": {
+      cardEdit();
+      const card = cardById(op.cardId);
+      if (!card.table) throw new SceneError("Esse card não é uma tabela.");
+      const index = Math.min(card.table.entries.length - 1, Math.floor(rng() * card.table.entries.length));
+      const entry = card.table.entries[index];
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, table: { ...card.table!, last: index } } : c))),
+        message: (who) => card.hidden ? "" : `${who} sorteou em ${card.title}: ${entry}.`,
       };
     }
     case "audio:play": {
@@ -543,7 +786,56 @@ function cleanCard(id: string, title: unknown, text: unknown): SceneCard {
     mediaId: null,
     audio: null,
     clock: null,
+    counter: null,
+    timer: null,
+    table: null,
+    turns: null,
+    poll: null,
+    checklist: null,
     zoneId: null,
+  };
+}
+
+function cleanCounter(value: unknown, min: unknown, max: unknown): CounterSpec {
+  const lo = clampInt(min, -999, 999);
+  const hi = Math.max(lo, clampInt(max, -999, 999));
+  return { min: lo, max: hi, value: clampInt(value, lo, hi) };
+}
+
+/** Entradas da tabela: sem linhas vazias, de 2 a MAX_ENTRIES. */
+function cleanEntries(raw: unknown): string[] {
+  const entries = (Array.isArray(raw) ? raw : [])
+    .filter((e): e is string => typeof e === "string")
+    .map((e) => e.trim().slice(0, 200))
+    .filter(Boolean)
+    .slice(0, MAX_ENTRIES);
+  if (entries.length < 2) throw new SceneError("A tabela precisa de ao menos duas entradas.");
+  return entries;
+}
+
+function cleanStoredTable(raw: unknown): TableSpec {
+  const t = (typeof raw === "object" && raw !== null ? raw : {}) as { entries?: unknown; last?: unknown };
+  let entries: string[];
+  try {
+    entries = cleanEntries(t.entries);
+  } catch {
+    entries = ["Sem entradas", "Sem entradas"];
+  }
+  const last = Number.isInteger(t.last) && (t.last as number) >= 0 && (t.last as number) < entries.length ? t.last as number : null;
+  return { entries, last };
+}
+
+/** O estado do tempo lido de disco: nada continua rodando depois de um reinício do servidor. */
+function cleanTimer(raw: unknown, mode: "down" | "up"): TimerSpec {
+  const t = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const running = t.running === true && typeof t.startedAt === "number";
+  const elapsed = (typeof t.base === "number" ? t.base : 0) + (running ? (Date.now() - (t.startedAt as number)) / 1000 : 0);
+  return {
+    mode,
+    duration: mode === "down" ? clampInt(t.duration ?? 60, 1, MAX_DURATION) : 0,
+    running: false,
+    startedAt: null,
+    base: Math.max(0, Math.min(elapsed, MAX_DURATION)),
   };
 }
 
@@ -578,12 +870,19 @@ function cleanZone(scene: Scene, id: string, name: unknown, description: unknown
   return { id, name: title, description: cleanText(description), cells: clean };
 }
 
-/** A cena como o destinatário pode vê-la: jogadores não recebem cards ocultos. */
-export function sceneFor(state: SceneState, isHost: boolean): SceneState {
-  if (isHost) return state;
+/**
+ * A cena como `viewer` pode vê-la: jogadores não recebem cards ocultos, e ninguém, nem o
+ * anfitrião, recebe os votos dos outros enquanto uma votação está aberta.
+ */
+export function sceneFor(state: SceneState, isHost: boolean, viewer = ""): SceneState {
   return {
     ...state,
-    scenes: state.scenes.map((s) => ({ ...s, cards: s.cards.filter((c) => !c.hidden) })),
+    scenes: state.scenes.map((s) => ({
+      ...s,
+      cards: s.cards
+        .filter((c) => isHost || !c.hidden)
+        .map((c) => (c.poll ? { ...c, poll: pollFor(c.poll, viewer) } : c)),
+    })),
   };
 }
 
@@ -625,6 +924,14 @@ export function normalizeSceneState(value: unknown): SceneState {
         kind,
         mediaId: (kind === "image" || kind === "audio") && typeof card.mediaId === "string" ? card.mediaId : null,
         audio: kind === "audio" ? cleanAudio(card.audio) : null,
+        counter: kind === "counter"
+          ? cleanCounter((card.counter as CounterSpec | undefined)?.value, (card.counter as CounterSpec | undefined)?.min ?? 0, (card.counter as CounterSpec | undefined)?.max ?? 10)
+          : null,
+        timer: kind === "timer" || kind === "stopwatch" ? cleanTimer(card.timer, kind === "timer" ? "down" : "up") : null,
+        table: kind === "table" ? cleanStoredTable(card.table) : null,
+        turns: kind === "turns" ? cleanTurns(card.turns) : null,
+        poll: kind === "poll" ? cleanPoll(card.poll) : null,
+        checklist: kind === "checklist" ? cleanChecklist(card.checklist) : null,
         clock: kind === "clock" ? { segments, filled: clampInt(clock?.filled ?? 0, 0, segments) } : null,
         zoneId: scene.zones.some((z) => z.id === card.zoneId) ? card.zoneId as string : null,
       });
