@@ -12,6 +12,10 @@ config/features=PackedStringArray("4.7")
 Sfx="*res://scripts/autoload/sfx.gd"
 Speech="*res://scripts/autoload/speech.gd"
 
+[audio]
+
+driver/enable_input=true
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

@@ -76,6 +76,85 @@ func _goto_row(sheets: Control, matches: Callable) -> void:
 		await _key(KEY_DOWN, KEY_DOWN)
 
 
+## Um tom de `seconds` segundos, estéreo a 48 kHz.
+func _tone(seconds: float, amplitude: float) -> PackedVector2Array:
+	var frames := PackedVector2Array()
+	for i in int(48000.0 * seconds):
+		var s := amplitude * sin(TAU * 440.0 * float(i) / 48000.0)
+		frames.append(Vector2(s, s))
+	return frames
+
+
+func _noise(seconds: float, amplitude: float) -> PackedVector2Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var frames := PackedVector2Array()
+	var low := 0.0
+	for i in int(48000.0 * seconds):
+		# Passa-baixas: um zumbido de ventilador, o tipo de ruído que o RNNoise tira.
+		low = low * 0.95 + rng.randf_range(-amplitude, amplitude) * 0.4
+		frames.append(Vector2(low, low))
+	return frames
+
+
+func _voice_tests(table: Control, ana: Node) -> void:
+	var voice: Node = table._voice
+	var panel: Control = table._audio
+	_check(voice.available(), "a extensão de voz carregou")
+	if not voice.available():
+		return
+	var kinds: Array = panel._rows.map(func(r: Dictionary) -> String: return r["kind"])
+	_check(kinds.has("voice_mode") and kinds.has("voice_speakers"), "a região de áudio lista os controles de voz")
+	var mode_row: Dictionary = panel._rows[kinds.find("voice_mode")]
+	_check(panel._row_text(mode_row) == "Voz: desligado", "a voz começa desligada")
+	_check(panel._row_text(panel._rows[kinds.find("voice_noise")]) == "Supressão de ruído: ligada", "supressão de ruído ligada por padrão")
+
+	# Quem fala soa de onde está sentado.
+	ana.send_seat("z1")
+	_check(await _wait(func() -> bool: return table._client.seats.get("Ana", "") == "z1"), "o lugar de Ana chega a Caio")
+	var codec: RefCounted = ClassDB.instantiate("VoiceCodec")
+	var packets: Array = codec.encode(_tone(0.5, 0.4))
+	_check(packets.size() >= 24, "o codec gera pacotes de 20 ms")
+	for packet in packets:
+		ana.send_voice(packet)
+	_check(await _wait(func() -> bool: return voice._peers.has("Ana")), "Caio ouve a voz de Ana")
+	_check(await _wait(func() -> bool: return voice.speakers().has("Ana")), "Ana aparece como falando")
+	var spot: Vector2 = table._audio_engine.spot_of("z1")
+	_check(voice._peers["Ana"]["player"].position.is_equal_approx(spot), "a voz de Ana sai da zona dela")
+	_check(panel._row_text({"kind": "voice_speakers"}) == "Falando agora: Ana", "a lista diz quem fala")
+	_check(await _wait(func() -> bool: return voice.speakers().is_empty(), 3.0), "depois do silêncio ninguém fala")
+	ana.send_seat("")
+	_check(await _wait(func() -> bool: return not table._client.seats.has("Ana")), "levantar tira Ana dos lugares")
+
+	# Enviar: o microfone aberto só manda quando há voz.
+	var heard: Array = []
+	ana.voice_received.connect(func(peer: String, packet: PackedByteArray) -> void: heard.append([peer, packet]))
+	voice.mode = "open"
+	voice.feed(_tone(0.5, 0.4), 0.5)
+	_check(await _wait(func() -> bool: return heard.size() >= 20 and heard[0][0] == "Caio"), "o microfone aberto envia a voz de Caio para Ana")
+	voice._hang = 0.0
+	heard.clear()
+	voice.feed(PackedVector2Array(_tone(1.0, 0.0)), 1.0)
+	await process_frame
+	await process_frame
+	_check(heard.is_empty(), "o microfone aberto não envia silêncio")
+	voice.mode = "off"
+
+	# Supressão de ruído: um zumbido de fundo fica muito mais baixo com ela ligada.
+	var raw: RefCounted = ClassDB.instantiate("VoiceCodec")
+	raw.set_suppression(false)
+	raw.encode(_noise(1.0, 0.05))
+	var clean: RefCounted = ClassDB.instantiate("VoiceCodec")
+	clean.set_suppression(true)
+	clean.encode(_noise(1.0, 0.05))
+	_check(clean.level() < raw.level() * 0.5, "a supressão derruba o ruído de fundo (%.4f contra %.4f)" % [clean.level(), raw.level()])
+
+	# Outro dispositivo e microfone ligado em modo push-to-talk não derrubam o app sem hardware.
+	voice.set_mode("ptt")
+	_check(voice.mode == "ptt" and panel._row_text(mode_row).begins_with("Voz: push-to-talk"), "o modo push-to-talk liga")
+	voice.set_mode("off")
+
+
 func _run() -> void:
 	# Em _initialize a árvore ainda não está ativa (HTTPRequest recusa pedidos).
 	await process_frame
@@ -448,8 +527,9 @@ func _run() -> void:
 	var audio_panel: Control = table._audio
 	var engine: Node = table._audio_engine
 	_check(await _wait(func() -> bool: return audio_panel._rows.filter(func(r: Dictionary) -> bool: return r["kind"] == "audio").size() == 2), "Caio vê os dois sons na região de Áudio")
-	_check(audio_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["master", "position", "header", "audio", "header", "audio"], "a lista tem volume, posição e seções de ambiência e efeito")
-	_check(audio_panel._row_text(audio_panel._rows[3]).contains("Fogueira, ambiência, parado") and audio_panel._row_text(audio_panel._rows[3]).contains("na zona Altar"), "o som fala modo, estado e zona")
+	_check(audio_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]).filter(func(k: String) -> bool: return not k.begins_with("voice")) == ["master", "position", "header", "audio", "header", "audio"], "a lista tem volume, posição e seções de ambiência e efeito")
+	var first_audio: int = audio_panel._rows.find_custom(func(r: Dictionary) -> bool: return r["kind"] == "audio")
+	_check(audio_panel._row_text(audio_panel._rows[first_audio]).contains("Fogueira, ambiência, parado") and audio_panel._row_text(audio_panel._rows[first_audio]).contains("na zona Altar"), "o som fala modo, estado e zona")
 	ana.scene_op({"type": "audio:play", "cardId": "fogo"})
 	_check(await _wait(func() -> bool: return engine.has_voice("fogo")), "Caio baixa o som e ele começa a tocar")
 	_check(engine.is_positional("fogo"), "o som numa zona é posicional")
@@ -457,7 +537,7 @@ func _run() -> void:
 	audio_panel._cursor = 0
 	await _key(KEY_LEFT, KEY_LEFT)
 	_check(is_equal_approx(engine.master, 0.9), "Esquerda no volume geral baixa só o de Caio")
-	audio_panel._cursor = 3
+	audio_panel._cursor = first_audio
 	await _key(KEY_ENTER, KEY_ENTER)
 	_check(engine.has_voice("fogo"), "quem não é anfitrião não para o som")
 	ana.scene_op({"type": "audio:stop", "cardId": "fogo"})
@@ -466,6 +546,7 @@ func _run() -> void:
 	await _key(KEY_1, KEY_1)
 	scene_panel._zone.grab_focus()
 	DirAccess.remove_absolute(wav_path)
+	await _voice_tests(table, ana)
 
 	# Contador, temporizador e tabela: Ana cria, Caio usa pelo teclado.
 	ana.scene_op({"type": "card:add", "id": "vidas", "title": "Vidas", "text": "", "kind": "counter", "min": 0, "max": 5, "value": 3})

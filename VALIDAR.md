@@ -42,6 +42,17 @@ Marque ao validar e apague o que já foi confirmado.
 - [ ] Campos de número só aceitam dígitos (e um menos onde o valor pode ser negativo); a duração aceita dois pontos.
 - [ ] O campo de chat devolve o foco para a região de onde saiu, ao enviar e ao cancelar.
 
+## Chat de voz
+- [ ] Região Áudio: "Voz: desligado"; Enter alterna entre desligado, push-to-talk e microfone aberto (o Windows pode pedir permissão ao microfone).
+- [ ] Push-to-talk: segurar F4 fala e soltar para; o clique de início e fim é ouvido.
+- [ ] Microfone aberto só transmite quando você fala (sem chiado entre as falas).
+- [ ] Supressão de ruído (ligada por padrão): ventilador, teclado e música de fundo somem sem "engolir" a voz; comparar com ela desligada.
+- [ ] Escolher microfone e saída das vozes pela lista de dispositivos; a escolha fica salva.
+- [ ] A voz de quem está sentado numa zona sai daquele lado: mudar "Minha posição" de um e ouvir o outro mudar de lado e de volume.
+- [ ] "Falando agora" lista quem fala; "Avisar quem começa a falar" fala o nome sem atropelar a navegação.
+- [ ] Atraso aceitável e sem cortes com 3 ou 4 pessoas, pela internet (Radmin) e na rede local.
+- [ ] O pacote do cliente leva a DLL de voz e funciona em outro computador (sem instalar nada).
+
 ## Pacote do cliente
 - [ ] `dist/Guacamole-cliente-windows.zip` abre em outro computador, fala pelo leitor de tela e conecta ao servidor.
 - [ ] O pacote foi gerado com o modelo de exportação 4.7.1 e o editor 4.7.2; se algo estranho aparecer, reexportar com o modelo 4.7.2.

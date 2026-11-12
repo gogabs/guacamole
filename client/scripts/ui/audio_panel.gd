@@ -17,13 +17,15 @@ const MODE_NAMES := {"ambient": "ambiência", "music": "música", "effect": "efe
 const MODE_ORDER := ["music", "ambient", "effect"]
 
 const HELP := (
-	"Áudio. Setas navegam, esquerda e direita mudam o volume. Anfitrião: Enter toca ou para, "
+	"Áudio. Setas navegam, esquerda e direita mudam o volume. Voz: Enter nas linhas de voz muda o modo, "
+	+ "a supressão e os dispositivos; no push-to-talk, segure F4 para falar. Anfitrião: Enter toca ou para, "
 	+ "1 a 9 disparam efeitos, Shift mais número dá a tecla ao som, L liga o loop, M troca o modo, "
 	+ "P põe o som numa zona, E renomeia, Delete remove, V oculta ou revela."
 )
 
 var _client: Node
 var _engine: Node
+var _voice: Node
 var _zone: PanelContainer
 var _view: RichTextLabel
 var _edit: LineEdit
@@ -46,9 +48,10 @@ func focus_zone() -> Control:
 	return _zone
 
 
-func setup(client: Node, engine: Node) -> void:
+func setup(client: Node, engine: Node, voice: Node) -> void:
 	_client = client
 	_engine = engine
+	_voice = voice
 
 
 func _ready() -> void:
@@ -75,6 +78,9 @@ func _ready() -> void:
 
 	_client.scene_changed.connect(_on_scene_changed)
 	_client.server_error.connect(func(_message: String) -> void: _announce_next = false)
+	_voice.speakers_changed.connect(func() -> void:
+		if _mode == "browse":
+			_rebuild())
 	_rebuild()
 
 
@@ -118,6 +124,11 @@ func _rebuild() -> void:
 	_rows = []
 	_rows.append({"kind": "master"})
 	_rows.append({"kind": "position"})
+	if _voice.available():
+		for kind in ["voice_mode", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
+			_rows.append({"kind": kind})
+	else:
+		_rows.append({"kind": "header", "text": "Voz indisponível: a extensão de voz não foi carregada."})
 	if _is_host():
 		_rows.append({"kind": "stop_all"})
 		_rows.append({"kind": "new_audio"})
@@ -152,6 +163,22 @@ func _row_text(row: Dictionary) -> String:
 		"position":
 			var label := _zone_name(_engine.listener_zone)
 			return "Minha posição: %s" % ("zona %s" % label if not label.is_empty() else "centro da cena")
+		"voice_mode":
+			var hint: String = ", segure F4 para falar" if _voice.mode == "ptt" else ""
+			return "Voz: %s%s" % [_voice.MODE_NAMES[_voice.mode], hint]
+		"voice_noise":
+			return "Supressão de ruído: %s" % ("ligada" if _voice.suppress else "desligada")
+		"voice_in":
+			return "Microfone: %s" % AudioServer.input_device
+		"voice_out":
+			return "Saída das vozes: %s" % AudioServer.output_device
+		"voice_volume":
+			return "Volume das vozes, só para você: %d" % roundi(_voice.volume * 100.0)
+		"voice_announce":
+			return "Avisar quem começa a falar: %s" % ("sim" if _voice.announce else "não")
+		"voice_speakers":
+			var names: Array = _voice.speakers()
+			return "Falando agora: %s" % ", ".join(names) if not names.is_empty() else "Ninguém falando"
 		"stop_all":
 			return "Parar todos os sons"
 		"new_audio":
@@ -177,9 +204,9 @@ func _row_text(row: Dictionary) -> String:
 
 func _is_button(row: Dictionary) -> bool:
 	match row["kind"]:
-		"header":
+		"header", "voice_speakers":
 			return false
-		"master", "position":
+		"master", "position", "voice_mode", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce":
 			return true
 		_:
 			return _is_host()
@@ -343,6 +370,14 @@ func _nudge(row: Dictionary, direction: int) -> void:
 			_engine.set_master(target)
 			Sfx.play("tick", 0.8 + target)
 			Speech.say(_row_text(row), true)
+		"voice_volume":
+			var target := clampf(_voice.volume + 0.1 * direction, 0.0, 1.0)
+			if is_equal_approx(target, _voice.volume):
+				Sfx.play("edge")
+				return
+			_voice.set_volume(target)
+			Sfx.play("tick", 0.8 + target)
+			Speech.say(_row_text(row), true)
 		"audio":
 			if not _need_host():
 				return
@@ -367,6 +402,24 @@ func _activate(row: Dictionary) -> void:
 				_engine.set_listener_zone(zone_id)
 				_rebuild()
 				Speech.say(_row_text({"kind": "position"}), true))
+		"voice_mode":
+			_voice.cycle_mode()
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_noise":
+			_voice.set_suppression(not _voice.suppress)
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_announce":
+			_voice.set_announce(not _voice.announce)
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_in":
+			_choose_device("Qual microfone?", _voice.input_devices(), AudioServer.input_device, _voice.set_input_device, row)
+		"voice_out":
+			_choose_device("Por onde tocar as vozes?", _voice.output_devices(), AudioServer.output_device, _voice.set_output_device, row)
+		"voice_volume", "voice_speakers":
+			Speech.say(_row_text(row), true)
 		"stop_all":
 			if _need_host():
 				_op({"type": "audio:stopall"})
@@ -380,6 +433,21 @@ func _activate(row: Dictionary) -> void:
 			var audio: Dictionary = card["audio"]
 			_follow = str(card["id"])
 			_op({"type": "audio:stop" if audio["playing"] else "audio:play", "cardId": card["id"]})
+
+
+func _choose_device(title: String, devices: PackedStringArray, current: String, apply: Callable, row: Dictionary) -> void:
+	var options: Array = []
+	for device in devices:
+		options.append({"label": device, "value": device})
+	if options.is_empty():
+		Speech.say("Nenhum dispositivo encontrado.", true)
+		return
+	_begin_choice(title, options, func(device: String) -> void:
+		apply.call(device)
+		_rebuild()
+		Speech.say(_row_text(row), true))
+	_choice_index = maxi(0, devices.find(current))
+	_render()
 
 
 func _fire_slot(slot: int) -> void:

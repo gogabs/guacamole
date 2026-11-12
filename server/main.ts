@@ -42,6 +42,10 @@ export interface RunningServer {
 }
 
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const MAX_VOICE_PACKET = 400;
+const MAX_VOICE_BACKLOG = 64 * 1024;
+const VOICE_RATE = 60;
+const VOICE_BURST = 25;
 
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const rng = options.rng ?? defaultRng;
@@ -85,6 +89,38 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       send(socket, { type: "scene:sync", scene: sceneFor(room.scene, player.role === "host", player.name) });
     }
   };
+
+  /** Lugar de cada participante na cena (zona), só em memória: some quando a pessoa sai. */
+  const seats = new Map<string, Map<string, string>>();
+  const seatsOf = (roomId: string) => Object.fromEntries(seats.get(roomId) ?? []);
+  const broadcastSeats = (roomId: string) => broadcast(roomId, { type: "voice:seats", seats: seatsOf(roomId) });
+
+  /**
+   * Repassa um pacote de voz aos outros da mesa como [tamanho do nome][nome][pacote Opus].
+   * Pacotes grandes demais ou em ritmo acima do de uma fala normal (50 por segundo) são descartados.
+   */
+  const relayVoice = (room: RoomRecord, socket: WebSocket, player: Player, packet: Uint8Array) => {
+    if (packet.length === 0 || packet.length > MAX_VOICE_PACKET) return;
+    const now = Date.now();
+    const bucket = voiceBuckets.get(socket) ?? { tokens: VOICE_BURST, at: now };
+    bucket.tokens = Math.min(VOICE_BURST, bucket.tokens + ((now - bucket.at) / 1000) * VOICE_RATE);
+    bucket.at = now;
+    voiceBuckets.set(socket, bucket);
+    if (bucket.tokens < 1) return;
+    bucket.tokens -= 1;
+
+    const name = new TextEncoder().encode(player.name);
+    const frame = new Uint8Array(1 + name.length + packet.length);
+    frame[0] = name.length;
+    frame.set(name, 1);
+    frame.set(packet, 1 + name.length);
+    for (const other of connections.get(room.id)?.keys() ?? []) {
+      if (other === socket || other.readyState !== WebSocket.OPEN) continue;
+      if (other.bufferedAmount > MAX_VOICE_BACKLOG) continue;
+      other.send(frame);
+    }
+  };
+  const voiceBuckets = new WeakMap<WebSocket, { tokens: number; at: number }>();
 
   const broadcastEntry = (room: RoomRecord, entry: ChatEntry) => {
     broadcast(room.id, { type: "chat:entry", entry });
@@ -174,6 +210,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     }
 
     const { socket, response } = Deno.upgradeWebSocket(request);
+    socket.binaryType = "arraybuffer";
     const roomConnections = connections.get(room.id) ?? new Map<WebSocket, Player>();
     connections.set(room.id, roomConnections);
     const player: Player = {
@@ -199,16 +236,35 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         compendiums: room.compendiums,
       });
       broadcast(room.id, { type: "presence:sync", players: playersOf(room.id) });
+      send(socket, { type: "voice:seats", seats: seatsOf(room.id) });
       broadcastEntry(room, systemEntry(room, `${player.name} entrou na mesa.`));
     };
 
     socket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        relayVoice(room, socket, player, new Uint8Array(event.data));
+        return;
+      }
       let message: ClientMessage;
       try {
         message = parseClientMessage(String(event.data));
       } catch (error) {
         const text = error instanceof ProtocolError ? error.message : "Mensagem inválida.";
         send(socket, { type: "error", message: text });
+        return;
+      }
+      if (message.type === "voice:seat") {
+        const active = room.scene.scenes.find((s) => s.id === room.scene.activeId);
+        const known = message.zoneId === "" || active?.zones.some((z) => z.id === message.zoneId);
+        if (!known) {
+          send(socket, { type: "error", message: "Essa zona não existe na cena." });
+          return;
+        }
+        const mine = seats.get(room.id) ?? new Map<string, string>();
+        seats.set(room.id, mine);
+        if (message.zoneId === "") mine.delete(player.name);
+        else mine.set(player.name, message.zoneId);
+        broadcastSeats(room.id);
         return;
       }
       const outcome = handleClientMessage(room, player, message, rng, playersOf(room.id).map((p) => p.name));
@@ -243,6 +299,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       if (closed) return;
       closed = true;
       roomConnections.delete(socket);
+      if (seats.get(room.id)?.delete(player.name)) broadcastSeats(room.id);
       broadcast(room.id, { type: "presence:sync", players: playersOf(room.id) });
       broadcastEntry(room, systemEntry(room, `${player.name} saiu da mesa.`));
     };

@@ -4,6 +4,8 @@ extends Node
 ## centro da sua zona ("Minha posição") ou no centro do grid. Tudo o mais é o estado do servidor:
 ## o card diz se toca e desde quando (no relógio do servidor), e quem entra depois cai no ponto certo.
 
+signal listener_moved(zone_id: String)
+
 const CELL := 100.0
 
 ## Volume geral só de quem ouve, de 0 a 1.
@@ -50,6 +52,14 @@ func set_master(value: float) -> void:
 func set_listener_zone(zone_id: String) -> void:
 	listener_zone = zone_id
 	sync()
+	listener_moved.emit(zone_id)
+
+
+## Onde fica uma zona da cena ativa (ou o centro do grid, se não existir): usado pela voz.
+func spot_of(zone_id: String) -> Vector2:
+	var scene := _active()
+	var at: Variant = _zone_position(scene, zone_id) if not zone_id.is_empty() else null
+	return at if at != null else _grid_center(scene)
 
 
 # --- Cena -----------------------------------------------------------------------------------------

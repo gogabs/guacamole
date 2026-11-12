@@ -16,6 +16,7 @@ const ScenePanel := preload("res://scripts/ui/scene_panel.gd")
 const CompendiumPanel := preload("res://scripts/ui/compendium_panel.gd")
 const AudioPanel := preload("res://scripts/ui/audio_panel.gd")
 const AudioEngine := preload("res://scripts/audio/audio_engine.gd")
+const VoiceChat := preload("res://scripts/audio/voice_chat.gd")
 
 const FUNCTION_KEYS := [KEY_F1, KEY_F2, KEY_F3, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F10]
 const SAFETY_KEYS := {KEY_F5: "stop", KEY_F6: "pause", KEY_F7: "rewind", KEY_F8: "forward"}
@@ -53,6 +54,7 @@ var _scene: Control
 var _compendiums: Control
 var _audio: Control
 var _audio_engine: Node
+var _voice: Node
 
 
 func setup(client: Node, you: Dictionary, room: Dictionary, players: Array, history: Array) -> void:
@@ -114,8 +116,11 @@ func _ready() -> void:
 	_audio_engine = AudioEngine.new()
 	_audio_engine.setup(_client)
 	add_child(_audio_engine)
+	_voice = VoiceChat.new()
+	_voice.setup(_client, _audio_engine)
+	add_child(_voice)
 	var audio_panel := AudioPanel.new()
-	audio_panel.setup(_client, _audio_engine)
+	audio_panel.setup(_client, _audio_engine, _voice)
 	audio_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	middle.add_child(audio_panel)
 	_audio = audio_panel

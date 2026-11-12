@@ -90,6 +90,8 @@ export type ClientMessage =
   /** Queima o momentum sobre a última rolagem de Ironsworn desta ficha. */
   | { type: "sheet:burn"; characterId: string }
   | { type: "scene:op"; op: SceneOp }
+  /** Senta numa zona da cena ("" levanta): a voz de cada um soa de onde ele está. */
+  | { type: "voice:seat"; zoneId: string }
   /** Qualquer um adiciona um compêndio à mesa; só o anfitrião o tira. */
   | { type: "compendium:add"; compendiumId: string }
   | { type: "compendium:remove"; compendiumId: string }
@@ -130,6 +132,8 @@ export type ServerMessage =
   /** Um efeito do soundboard foi disparado; `serverTime` ajuda a calcular o atraso. */
   | { type: "audio:fire"; cardId: string; serverTime: number }
   | { type: "presence:sync"; players: Player[] }
+  /** Zona em que cada participante está sentado (nome do jogador para id da zona). */
+  | { type: "voice:seats"; seats: Record<string, string> }
   | { type: "room:sync"; room: RoomSummary }
   | { type: "error"; message: string };
 
@@ -178,6 +182,11 @@ export function parseClientMessage(data: string): ClientMessage {
     const value = message[key];
     return typeof value === "string" && value.length <= 200 ? value : null;
   };
+  if (message.type === "voice:seat") {
+    const zoneId = str("zoneId");
+    if (zoneId !== null) return { type: "voice:seat", zoneId };
+    throw new ProtocolError("Lugar inválido.");
+  }
   if (message.type === "scene:op") {
     const op = message.op as Record<string, unknown> | undefined;
     if (typeof op === "object" && op !== null && SCENE_OP_TYPES.includes(String(op.type))) {

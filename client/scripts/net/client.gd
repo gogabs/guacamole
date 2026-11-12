@@ -13,6 +13,8 @@ signal compendiums_changed(ids: Array)
 signal compendium_item_received(compendium_id: String, item: Dictionary)
 signal media_ready(media_id: String)
 signal audio_fired(card_id: String)
+signal seats_changed(seats: Dictionary)
+signal voice_received(peer: String, packet: PackedByteArray)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -29,6 +31,8 @@ var characters: Dictionary = {}
 ## Compêndios que o servidor oferece (sem conteúdo) e os ids dos que a mesa adicionou.
 var catalog: Array = []
 var compendiums: Array = []
+## Zona em que cada participante está sentado: nome do jogador -> id da zona.
+var seats: Dictionary = {}
 
 var _items: Dictionary = {}  # "compêndio/item" -> conteúdo já recebido
 var _token := ""
@@ -314,12 +318,34 @@ func leave() -> void:
 	characters = {}
 	catalog = []
 	compendiums = []
+	seats = {}
 	_items = {}
+
+
+## Senta numa zona da cena ("" levanta); a voz de cada um soa de onde está sentado.
+func send_seat(zone_id: String) -> void:
+	_send({"type": "voice:seat", "zoneId": zone_id})
+
+
+## Manda um pacote de voz (Opus) para o resto da mesa.
+func send_voice(packet: PackedByteArray) -> void:
+	if is_connected_to_room():
+		_ws.send(packet, WebSocketPeer.WRITE_MODE_BINARY)
 
 
 func _send(message: Dictionary) -> void:
 	if is_connected_to_room():
 		_ws.send_text(JSON.stringify(message))
+
+
+## Quadro de voz: [tamanho do nome][nome em UTF-8][pacote Opus].
+func _handle_voice(frame: PackedByteArray) -> void:
+	if frame.size() < 2:
+		return
+	var length := int(frame[0])
+	if frame.size() <= 1 + length:
+		return
+	voice_received.emit(frame.slice(1, 1 + length).get_string_from_utf8(), frame.slice(1 + length))
 
 
 func _process(_delta: float) -> void:
@@ -330,7 +356,11 @@ func _process(_delta: float) -> void:
 		WebSocketPeer.STATE_OPEN:
 			_opened = true
 			while _ws.get_available_packet_count() > 0:
-				_handle(_ws.get_packet().get_string_from_utf8())
+				var packet := _ws.get_packet()
+				if _ws.was_string_packet():
+					_handle(packet.get_string_from_utf8())
+				else:
+					_handle_voice(packet)
 		WebSocketPeer.STATE_CLOSED:
 			var was_open := _opened
 			_active = false
@@ -373,6 +403,9 @@ func _handle(raw: String) -> void:
 			scene_changed.emit(scene)
 		"audio:fire":
 			audio_fired.emit(str(message["cardId"]))
+		"voice:seats":
+			seats = message["seats"]
+			seats_changed.emit(seats)
 		"compendium:sync":
 			compendiums = message["compendiums"]
 			compendiums_changed.emit(compendiums)

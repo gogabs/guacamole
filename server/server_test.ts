@@ -8,11 +8,20 @@ class TestClient {
   private queue: ServerMessage[] = [];
   private wake: (() => void) | null = null;
 
+  /** Quadros binários (voz) recebidos. */
+  frames: Uint8Array[] = [];
+
   private constructor(private socket: WebSocket) {
+    socket.binaryType = "arraybuffer";
     socket.onmessage = (event) => {
-      this.queue.push(JSON.parse(event.data));
+      if (event.data instanceof ArrayBuffer) this.frames.push(new Uint8Array(event.data));
+      else this.queue.push(JSON.parse(event.data));
       this.wake?.();
     };
+  }
+
+  sendBytes(bytes: Uint8Array) {
+    this.socket.send(bytes as BufferSource);
   }
 
   static connect(url: string): Promise<TestClient> {
@@ -301,6 +310,49 @@ Deno.test("áudio: envio, tocar com relógio do servidor e disparo de efeito", a
     assertEquals((await bia.next("audio:fire")).cardId, "trovao");
     await ana.close();
     await bia.close();
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("voz: lugares na cena e repasse dos pacotes só aos outros", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const id = created.room.id;
+    const ana = await TestClient.connect(wsUrl(server.port, id, "Ana", created.hostToken));
+    const welcome = await ana.next("welcome");
+    const bia = await TestClient.connect(wsUrl(server.port, id, "Bia"));
+    await bia.next("welcome");
+    await bia.next("voice:seats", (m) => Object.keys(m.seats).length === 0);
+
+    ana.send({ type: "scene:op", op: { type: "zone:add", id: "mesa", name: "Mesa", description: "", cells: [{ x: 0, y: 0 }] } });
+    await bia.next("scene:sync", (m) => m.scene.scenes[0].zones.length === 1);
+
+    bia.send({ type: "voice:seat", zoneId: "nao-existe" });
+    assertEquals((await bia.next("error")).message, "Essa zona não existe na cena.");
+
+    bia.send({ type: "voice:seat", zoneId: "mesa" });
+    assertEquals((await ana.next("voice:seats", (m) => m.seats.Bia === "mesa")).seats, { Bia: "mesa" });
+
+    const packet = new Uint8Array([1, 2, 3, 4]);
+    bia.sendBytes(packet);
+    const deadline = Date.now() + 3000;
+    while (ana.frames.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assertEquals(ana.frames.length, 1);
+    const frame = ana.frames[0];
+    assertEquals(new TextDecoder().decode(frame.slice(1, 1 + frame[0])), "Bia");
+    assertEquals([...frame.slice(1 + frame[0])], [1, 2, 3, 4]);
+    assertEquals(bia.frames.length, 0);
+
+    bia.sendBytes(new Uint8Array(1000));
+    await new Promise((r) => setTimeout(r, 200));
+    assertEquals(ana.frames.length, 1);
+
+    await bia.close();
+    assertEquals((await ana.next("voice:seats", (m) => m.seats.Bia === undefined)).seats, {});
+    await ana.close();
   } finally {
     await server.shutdown();
   }

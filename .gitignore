@@ -14,3 +14,5 @@ data/*.tmp
 client/addons/prismatoid/bin/
 data/media/
 client/export_presets.cfg
+client/addons/guacamole_voice/bin/
+voice/target/
