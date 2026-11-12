@@ -44,7 +44,7 @@ Marque ao validar e apague o que já foi confirmado.
 
 ## Sons em pontos exatos da zona
 - [ ] Áudio, anfitrião: um som numa zona (P) e G entram no modo de posicionar; a fala explica as teclas e diz "Coluna, linha, à sua esquerda/direita, mais acima/abaixo".
-- [ ] As setas movem o som um quarto de quadrado (Shift, um inteiro) e ele muda de lado e de volume na hora, para você e para os outros. Agora o áudio da cena usa 3D (1,5 m por quadrado, o alto do grid é a frente): conferir com fones se o som muda claramente de lugar, inclusive dentro da mesma zona.
+- [ ] As setas movem o som um quarto de quadrado (Shift, um inteiro) e ele muda de lado e de volume na hora, para você e para os outros. Os sons posicionados (em zona) passam pelo mesmo caminho da voz: o codec decodifica, posiciona (HRTF ou pan, o mesmo modo da voz) e o Godot só toca (1,5 m por quadrado, o alto do grid é a frente). Conferir com fones se o som muda claramente de lugar, inclusive dentro da mesma zona, e se um som posto numa zona continua audível.
 - [ ] Limite da zona: o som para e a fala avisa; Home volta ao centro; Enter guarda; Escape devolve ao ponto anterior.
 - [ ] Vários sons na mesma zona em pontos diferentes formam uma cena sonora coerente (mato à esquerda, riacho à direita, fogueira ao fundo).
 - [ ] Encolher a zona tira o ponto que ficou de fora; a cena salva e a mesa salva guardam os pontos.
@@ -98,3 +98,4 @@ Marque ao validar e apague o que já foi confirmado.
 ## Geral
 - [ ] A fala de navegação não fica enfileirada (fila com intervalo mínimo no `speech.gd`).
 - [ ] Textos em português do Dungeon World 2 e dos compêndios, lidos por quem conhece o jogo.
+- [ ] Música longa (vários minutos) numa zona: começa sem travar o jogo (a decodificação roda numa thread) e entra no ponto certo para quem chega no meio.

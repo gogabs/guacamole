@@ -13,6 +13,8 @@ extends Node
 ## Escutar sempre funciona, mesmo com o próprio microfone desligado.
 
 signal speakers_changed
+## O modo de posicionamento mudou (hrtf, pan ou off): os sons da cena seguem o mesmo modo.
+signal spatial_changed(mode: String)
 
 const PTT_KEY := KEY_F4
 const BUS := "VozCaptura"
@@ -167,6 +169,7 @@ func set_spatial(value: String) -> void:
 		if value == "hrtf" and _codec != null:
 			_codec.hrtf_available()  # monta o modelo agora, e não no meio da primeira fala
 		_save_settings()
+		spatial_changed.emit(value)
 
 
 func cycle_spatial() -> void:

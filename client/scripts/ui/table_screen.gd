@@ -119,6 +119,8 @@ func _ready() -> void:
 	_voice = VoiceChat.new()
 	_voice.setup(_client)
 	add_child(_voice)
+	_audio_engine.set_spatial(_voice.spatial)
+	_voice.spatial_changed.connect(_audio_engine.set_spatial)
 	var audio_panel := AudioPanel.new()
 	audio_panel.setup(_client, _audio_engine, _voice)
 	audio_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL

@@ -36,6 +36,7 @@ var _token := ""
 var _textures: Dictionary = {}  # id da mídia -> Texture2D já baixada
 var _downloading: Dictionary = {}
 var _streams: Dictionary = {}  # id da mídia -> AudioStream já baixado
+var _audio_bytes: Dictionary = {}  # id da mídia -> bytes do arquivo de áudio (para a extensão decodificar)
 var _clock_skew_ms := 0.0
 var _ws := WebSocketPeer.new()
 var _active := false
@@ -293,6 +294,15 @@ func media_stream(media_id: String) -> AudioStream:
 	return null
 
 
+## Os bytes do arquivo de áudio com esse id, se já foram baixados; senão começa a baixar e devolve vazio.
+func media_bytes(media_id: String) -> PackedByteArray:
+	if _audio_bytes.has(media_id):
+		return _audio_bytes[media_id]
+	if not media_id.is_empty():
+		_fetch_media(media_id)
+	return PackedByteArray()
+
+
 ## O relógio do servidor, em milissegundos, estimado a partir do `serverTime` do welcome.
 func server_ms() -> float:
 	return Time.get_unix_time_from_system() * 1000.0 + _clock_skew_ms
@@ -321,6 +331,7 @@ func _download_media(media_id: String) -> void:
 	var stream := _decode_audio(bytes)
 	if stream != null:
 		_streams[media_id] = stream
+		_audio_bytes[media_id] = bytes
 	else:
 		var image := Image.new()
 		var error := image.load_png_from_buffer(bytes)
@@ -352,6 +363,7 @@ func _decode_audio(bytes: PackedByteArray) -> AudioStream:
 func leave() -> void:
 	_textures = {}
 	_streams = {}
+	_audio_bytes = {}
 	_downloading = {}
 	_token = ""
 	if _active:

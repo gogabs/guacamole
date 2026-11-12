@@ -346,6 +346,8 @@ func _run() -> void:
 	# Em _initialize a árvore ainda não está ativa (HTTPRequest recusa pedidos).
 	await process_frame
 	Store.path = "user://test_settings.cfg"
+	# Uma execução interrompida deixaria a última mesa salva e mudaria o menu.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(Store.path))
 	SheetLibrary.dir = "user://test_fichas_locais"
 	# As fichas de Caio são salvas sozinhas; sobras de uma execução anterior mudariam a lista.
 	if DirAccess.dir_exists_absolute(SheetLibrary.dir):
@@ -704,6 +706,9 @@ func _run() -> void:
 	wav.append_array("data".to_ascii_buffer())
 	wav.append_array(_u32(samples * 2))
 	wav.resize(44 + samples * 2)
+	# Um tom de 440 Hz de verdade (não silêncio), para dar para medir o que sai no barramento principal.
+	for i in samples:
+		wav.encode_s16(44 + i * 2, int(12000.0 * sin(TAU * 440.0 * float(i) / 8000.0)))
 	var wav_file := FileAccess.open(wav_path, FileAccess.WRITE)
 	wav_file.store_buffer(wav)
 	wav_file.close()
@@ -720,30 +725,41 @@ func _run() -> void:
 	ana.scene_op({"type": "audio:play", "cardId": "fogo"})
 	_check(await _wait(func() -> bool: return engine.has_voice("fogo")), "Caio baixa o som e ele começa a tocar")
 	_check(engine.is_positional("fogo"), "o som numa zona é posicional")
+	_check(await _wait(func() -> bool: return AudioServer.get_bus_peak_volume_left_db(0, 0) > -45.0 or AudioServer.get_bus_peak_volume_right_db(0, 0) > -45.0, 3.0), "o som numa zona sai de fato no barramento principal (%.1f dB)" % maxf(AudioServer.get_bus_peak_volume_left_db(0, 0), AudioServer.get_bus_peak_volume_right_db(0, 0)))
 	var box: Rect2 = audio_panel._zone_box("z1")
 	var spot := box.position + Vector2(0.25, 0.75)
+	var voice_at: Callable = func() -> Vector2: return engine._card_spot(engine._active(), engine._card("fogo"))
 	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": spot.x, "y": spot.y}})
-	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine._to3(spot * engine.CELL))), "o som toca do ponto exato dentro da zona")
-	var listener_at: Vector3 = engine._listener.position
-	var player: Node3D = engine._voices["fogo"]["player"]
-	_check(player is AudioStreamPlayer3D and engine._listener is AudioListener3D, "os sons da cena usam o áudio 3D, cujo pan vem do ângulo")
-	for step in [Vector2(0.5, 0), Vector2(-0.5, 0), Vector2(0, -0.5)]:
-		var moved: Vector2 = box.get_center() + step
-		ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": moved.x, "y": moved.y}})
-		await _wait(func() -> bool: return player.position.is_equal_approx(engine._to3(moved * engine.CELL)))
-		var relative: Vector3 = player.position - listener_at
-		var right_of_listener: bool = relative.x > engine._to3(box.get_center() * engine.CELL).x - listener_at.x
-		_check((step.x > 0.0) == right_of_listener or step.x == 0.0, "mover o som para %s o leva para %s de quem ouve" % [step, "a direita" if step.x > 0.0 else "a esquerda" if step.x < 0.0 else "a frente"])
-		if step.y < 0.0:
-			_check(player.position.z < engine._to3(box.get_center() * engine.CELL).z, "o alto do grid fica à frente de quem ouve (z menor)")
+	_check(await _wait(func() -> bool: return voice_at.call().is_equal_approx(spot * engine.CELL)), "o som toca do ponto exato dentro da zona")
+	_check(engine._voices["fogo"]["playback"] is AudioStreamGeneratorPlayback and not engine._voices["fogo"]["player"] is Node3D, "os sons da cena posicionais saem pelo codec, não pelo áudio 3D do Godot")
+	# A direção: à direita, à esquerda e à frente de quem ouve (o alto do grid é a frente).
+	var here: Vector2 = engine._listener_position(engine._active())
+	var right_of: Vector3 = engine.placement(here, here + Vector2(100, 0))["direction"]
+	var left_of: Vector3 = engine.placement(here, here + Vector2(-100, 0))["direction"]
+	var ahead: Vector3 = engine.placement(here, here + Vector2(0, -100))["direction"]
+	_check(right_of.x > 0.99 and left_of.x < -0.99 and ahead.z > 0.99, "à direita do grid é a direita de quem ouve e o alto do grid é a frente")
+	_check(float(engine.placement(here, here + Vector2(1200, 0))["closeness"]) > 0.5 and float(engine.placement(here, here)["closeness"]) == 1.0, "a queda de volume com a distância é suave: nunca some")
+	# O áudio de verdade: o som posicionado à direita sai mais no ouvido direito, e à esquerda no esquerdo.
+	var energy_of: Callable = func(direction: Vector3, hrtf: bool) -> Vector2:
+		engine._codec.voice_start("probe", sound["id"], 0.0, true)
+		var sum := Vector2.ZERO
+		for k in 20:
+			for v in engine._codec.voice_render("probe", direction.x, direction.y, direction.z, 1.0, hrtf):
+				sum += Vector2(v.x * v.x, v.y * v.y)
+		engine._codec.voice_stop("probe")
+		return sum
+	for hrtf_mode in [false, true]:
+		var to_right: Vector2 = energy_of.call(Vector3(1, 0, 0), hrtf_mode)
+		var to_left: Vector2 = energy_of.call(Vector3(-1, 0, 0), hrtf_mode)
+		var in_front: Vector2 = energy_of.call(Vector3(0, 0, 1), hrtf_mode)
+		_check(to_right.y > to_right.x * 1.5 and to_left.x > to_left.y * 1.5 and absf(in_front.x - in_front.y) < 0.05 * maxf(in_front.x, in_front.y), "o som da cena %s soa do lado certo (direita %s, esquerda %s, frente %s)" % ["em HRTF" if hrtf_mode else "em pan", to_right, to_left, in_front])
 	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": spot.x, "y": spot.y}})
-	await _wait(func() -> bool: return player.position.is_equal_approx(engine._to3(spot * engine.CELL)))
 	_check(audio_panel._row_text(audio_panel._rows[first_audio]).contains("em ponto exato"), "a lista diz que o som tem ponto exato")
 	audio_panel._spot_box = box
 	audio_panel._spot_at = spot
 	_check(audio_panel._spot_text().begins_with("Coluna "), "o ponto é falado em coluna e linha: %s" % audio_panel._spot_text())
 	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": null})
-	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine._to3(engine.spot_of("z1")))), "sem ponto exato o som volta ao centro da zona")
+	_check(await _wait(func() -> bool: return voice_at.call().is_equal_approx(engine.spot_of("z1"))), "sem ponto exato o som volta ao centro da zona")
 	audio_panel._zone.grab_focus()
 	audio_panel._cursor = 0
 	await _key(KEY_LEFT, KEY_LEFT)
@@ -753,6 +769,24 @@ func _run() -> void:
 	_check(engine.has_voice("fogo"), "quem não é anfitrião não para o som")
 	ana.scene_op({"type": "audio:stop", "cardId": "fogo"})
 	_check(await _wait(func() -> bool: return not engine.has_voice("fogo")), "parar o som o silencia para Caio")
+	# Pôr um som que já toca numa zona: ele continua soando, agora posicional.
+	ana.scene_op({"type": "card:add", "id": "chuva", "title": "Chuva", "text": "", "kind": "audio", "mediaId": sound["id"], "mode": "ambient"})
+	await _wait(func() -> bool: return not _card_of(table._client, "chuva").is_empty())
+	await _wait(func() -> bool: return maxf(AudioServer.get_bus_peak_volume_left_db(0, 0), AudioServer.get_bus_peak_volume_right_db(0, 0)) < -60.0, 3.0)
+	ana.scene_op({"type": "audio:play", "cardId": "chuva"})
+	_check(await _wait(func() -> bool: return engine.has_voice("chuva") and AudioServer.get_bus_peak_volume_left_db(0, 0) > -45.0), "o som solto toca")
+	_check(not engine.is_positional("chuva"), "e solto não é posicional")
+	ana.scene_op({"type": "card:place", "cardId": "chuva", "zoneId": "z1"})
+	_check(await _wait(func() -> bool: return engine.is_positional("chuva")), "pôr o som numa zona o torna posicional")
+	await _wait(func() -> bool: return maxf(AudioServer.get_bus_peak_volume_left_db(0, 0), AudioServer.get_bus_peak_volume_right_db(0, 0)) < -60.0, 0.1)
+	var after_place := -100.0
+	for i in 20:
+		await create_timer(0.1).timeout
+		after_place = maxf(after_place, maxf(AudioServer.get_bus_peak_volume_left_db(0, 0), AudioServer.get_bus_peak_volume_right_db(0, 0)))
+	_check(after_place > -20.0, "depois de posto na zona o som continua saindo bem alto (%.1f dB; solto era -11)" % after_place)
+	ana.scene_op({"type": "audio:stop", "cardId": "chuva"})
+	ana.scene_op({"type": "card:remove", "cardId": "chuva"})
+	await create_timer(0.3).timeout
 	ana.scene_op({"type": "audio:play", "cardId": "trovao"})
 	await _key(KEY_1, KEY_1)
 	scene_panel._zone.grab_focus()

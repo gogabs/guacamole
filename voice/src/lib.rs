@@ -5,9 +5,11 @@
 //! 20 ms (960 amostras), ou seja, 50 pacotes por segundo.
 
 mod head_model;
+mod sound;
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 
 use godot::prelude::*;
 use hrtf::{HrirSphere, HrtfContext, HrtfProcessor, Vec3};
@@ -42,6 +44,13 @@ struct HrtfEngine {
     source: String,
 }
 
+/// Um som da cena tocando: de onde do arquivo (em amostras a 48 kHz) e se repete.
+struct SoundVoice {
+    media: String,
+    position: usize,
+    looping: bool,
+}
+
 /// O estado de uma voz no HRTF: o historico da convolucao e o que foi usado no bloco anterior.
 struct HrtfVoice {
     history: Vec<f32>,
@@ -70,6 +79,11 @@ struct VoiceCodec {
     decoders: HashMap<String, Decoder>,
     hrtf: Option<HrtfEngine>,
     hrtf_voices: HashMap<String, HrtfVoice>,
+    /// Sons da cena ja decodificados (mono, 48 kHz), por id da midia.
+    sounds: HashMap<String, Vec<i16>>,
+    sound_voices: HashMap<String, SoundVoice>,
+    /// Decodificacoes em andamento (thread do proprio Rust), por id da midia.
+    decoding: HashMap<String, Arc<Mutex<Option<Vec<i16>>>>>,
     base: Base<RefCounted>,
 }
 
@@ -93,12 +107,44 @@ impl IRefCounted for VoiceCodec {
             decoders: HashMap::new(),
             hrtf: None,
             hrtf_voices: HashMap::new(),
+            sounds: HashMap::new(),
+            sound_voices: HashMap::new(),
+            decoding: HashMap::new(),
             base,
         }
     }
 }
 
 impl VoiceCodec {
+    /// Posiciona um bloco mono de PACKET amostras: HRTF (com a historia da convolucao em key) ou
+    /// pan por ganho. Sem HRTF disponivel ou com bloco de outro tamanho, cai no pan.
+    fn spatialize(&mut self, key: &str, mono: &[f32], x: f32, y: f32, z: f32, gain: f32, hrtf: bool) -> PackedVector2Array {
+        if hrtf && mono.len() == PACKET && self.ensure_hrtf() {
+            let engine = self.hrtf.as_mut().expect("hrtf pronto");
+            let direction = Vec3::new(if engine.flip_x { -x } else { x }, y, z);
+            let voice = self.hrtf_voices.entry(key.to_string()).or_insert(HrtfVoice {
+                history: Vec::new(),
+                prev: direction,
+                prev_gain: gain,
+            });
+            let mut out = vec![(0.0f32, 0.0f32); PACKET];
+            engine.processor.process_samples(HrtfContext {
+                source: mono,
+                output: &mut out,
+                new_sample_vector: direction,
+                prev_sample_vector: voice.prev,
+                new_gain: gain,
+                prev_gain: voice.prev_gain,
+                history: &mut voice.history,
+            });
+            voice.prev = direction;
+            voice.prev_gain = gain;
+            return out.iter().map(|(l, r)| Vector2::new(*l, *r)).collect();
+        }
+        let (left, right) = pan_gains(x, z);
+        mono.iter().map(|s| Vector2::new(*s * left * gain, *s * right * gain)).collect()
+    }
+
     fn ensure_hrtf(&mut self) -> bool {
         if self.hrtf.is_none() {
             let bytes = head_model::sphere_bytes(RATE, HRIR_LEN);
@@ -162,6 +208,17 @@ fn right_is_louder(processor: &mut HrtfProcessor) -> bool {
     }
     let (l, r) = out.iter().fold((0.0f32, 0.0f32), |(l, r), s| (l + s.0 * s.0, r + s.1 * s.1));
     r >= l
+}
+
+/// Ganhos (esquerdo, direito) do pan pela direcao: 1 e 1 a frente, so um lado a 90 graus.
+fn pan_gains(x: f32, z: f32) -> (f32, f32) {
+    let length = (x * x + z * z).sqrt();
+    if length < 1e-4 {
+        return (1.0, 1.0);
+    }
+    let pan = (x / length).clamp(-1.0, 1.0);
+    let angle = (pan + 1.0) * std::f32::consts::PI / 4.0;
+    ((std::f32::consts::SQRT_2 * angle.cos()).min(1.0), (std::f32::consts::SQRT_2 * angle.sin()).min(1.0))
 }
 
 /// Comprime so os picos acima de 0.7, sem mexer no resto, para o ganho nao gerar estalos.
@@ -297,31 +354,123 @@ impl VoiceCodec {
         let Some(mono) = self.decode_mono(&key, packet.as_slice()) else {
             return PackedVector2Array::new();
         };
-        if mono.len() != PACKET || !self.ensure_hrtf() {
-            return mono.iter().map(|s| Vector2::new(*s * gain, *s * gain)).collect();
-        }
-        let engine = self.hrtf.as_mut().expect("hrtf pronto");
-        let direction = Vec3::new(if engine.flip_x { -x } else { x }, y, z);
-        let voice = self.hrtf_voices.entry(key).or_insert(HrtfVoice {
-            history: Vec::new(),
-            prev: direction,
-            prev_gain: gain,
-        });
-        let mut out = vec![(0.0f32, 0.0f32); PACKET];
-        engine.processor.process_samples(HrtfContext {
-            source: &mono,
-            output: &mut out,
-            new_sample_vector: direction,
-            prev_sample_vector: voice.prev,
-            new_gain: gain,
-            prev_gain: voice.prev_gain,
-            history: &mut voice.history,
-        });
-        voice.prev = direction;
-        voice.prev_gain = gain;
-        out.iter().map(|(l, r)| Vector2::new(*l, *r)).collect()
+        self.spatialize(&key, &mono, x, y, z, gain, true)
     }
 
+    /// Comeca a decodificar um arquivo de audio (OGG, MP3 ou WAV) numa thread, sem travar o jogo.
+    /// `sound_poll` diz quando terminou. Nao chama nada do Godot de dentro da thread.
+    #[func]
+    fn sound_decode_start(&mut self, media: GString, file: PackedByteArray) {
+        let key = media.to_string();
+        if self.sounds.contains_key(&key) || self.decoding.contains_key(&key) {
+            return;
+        }
+        let bytes = file.as_slice().to_vec();
+        let slot: Arc<Mutex<Option<Vec<i16>>>> = Arc::new(Mutex::new(None));
+        let writer = Arc::clone(&slot);
+        std::thread::spawn(move || {
+            let decoded = sound::decode_mono_48k(&bytes).unwrap_or_default();
+            if let Ok(mut guard) = writer.lock() {
+                *guard = Some(decoded);
+            }
+        });
+        self.decoding.insert(key, slot);
+    }
+
+    /// Estado da decodificacao de `media`: 0 em andamento (ou nao iniciada), 1 pronto e carregado,
+    /// -1 o arquivo nao pode ser decodificado.
+    #[func]
+    fn sound_poll(&mut self, media: GString) -> i64 {
+        let key = media.to_string();
+        if self.sounds.contains_key(&key) {
+            return 1;
+        }
+        let Some(slot) = self.decoding.get(&key) else {
+            return 0;
+        };
+        let finished = slot.lock().ok().and_then(|mut guard| guard.take());
+        match finished {
+            None => 0,
+            Some(samples) => {
+                self.decoding.remove(&key);
+                if samples.is_empty() {
+                    -1
+                } else {
+                    self.sounds.insert(key, samples);
+                    1
+                }
+            }
+        }
+    }
+    #[func]
+    fn sound_has(&self, media: GString) -> bool {
+        self.sounds.contains_key(&media.to_string())
+    }
+
+    /// Duracao do som em segundos (0 se nao foi carregado).
+    #[func]
+    fn sound_length(&self, media: GString) -> f64 {
+        self.sounds.get(&media.to_string()).map(|s| s.len() as f64 / sound::RATE as f64).unwrap_or(0.0)
+    }
+
+    /// Comeca a tocar `media` como a voz `voice`, a partir de `offset` segundos; `looping` repete.
+    #[func]
+    fn voice_start(&mut self, voice: GString, media: GString, offset: f64, looping: bool) -> bool {
+        let media = media.to_string();
+        let Some(samples) = self.sounds.get(&media) else {
+            return false;
+        };
+        let mut position = (offset.max(0.0) * sound::RATE as f64) as usize;
+        if position >= samples.len() {
+            if !looping {
+                return false;
+            }
+            position %= samples.len();
+        }
+        self.sound_voices.insert(voice.to_string(), SoundVoice { media, position, looping });
+        true
+    }
+
+    #[func]
+    fn voice_stop(&mut self, voice: GString) {
+        let key = voice.to_string();
+        self.sound_voices.remove(&key);
+        self.hrtf_voices.remove(&format!("snd:{key}"));
+    }
+
+    /// O proximo bloco (20 ms, estereo) da voz `voice`, posicionado na direcao `(x, y, z)` (x para
+    /// a direita, y para cima, z para a frente) com o ganho `gain`. HRTF ou, se `hrtf` for falso,
+    /// pan por ganho. Vazio quando o som acabou.
+    #[func]
+    fn voice_render(&mut self, voice: GString, x: f32, y: f32, z: f32, gain: f32, hrtf: bool) -> PackedVector2Array {
+        let key = voice.to_string();
+        let Some(state) = self.sound_voices.get_mut(&key) else {
+            return PackedVector2Array::new();
+        };
+        let Some(samples) = self.sounds.get(&state.media) else {
+            return PackedVector2Array::new();
+        };
+        let mut mono = vec![0.0f32; PACKET];
+        let mut finished = false;
+        for slot in mono.iter_mut() {
+            if state.position >= samples.len() {
+                if state.looping {
+                    state.position = 0;
+                } else {
+                    finished = true;
+                    break;
+                }
+            }
+            *slot = samples[state.position] as f32 / 32_768.0;
+            state.position += 1;
+        }
+        if finished && state.position >= samples.len() && mono.iter().all(|s| *s == 0.0) {
+            self.sound_voices.remove(&key);
+            self.hrtf_voices.remove(&format!("snd:{key}"));
+            return PackedVector2Array::new();
+        }
+        self.spatialize(&format!("snd:{key}"), &mono, x, y, z, gain, hrtf)
+    }
     /// O HRTF esta pronto para uso? Cria o modelo de cabeca na primeira chamada.
     #[func]
     fn hrtf_available(&mut self) -> bool {
