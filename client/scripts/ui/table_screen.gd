@@ -32,7 +32,7 @@ const HELP := (
 	+ "Control Home e Control End: primeira e última mensagem. Page Up e Page Down: dez para trás e para frente. "
 	+ "Comece a mensagem com barra para comandos: barra roll 2d6 mais 3, barra fate mais 3, "
 	+ "barra iron mais 2, barra progress 6, ou barra x para parar a cena. "
-	+ "Tab alterna entre fichas, cena, áudio e compêndios; em cada uma, H lê a ajuda. F2: quem está na mesa. F3: soletrar e copiar o código. "
+	+ "Tab alterna entre fichas, cena, áudio e compêndios; em cada uma, H lê a ajuda. F2: quem está na mesa. F3: copiar o convite, com endereço e código da mesa. "
 	+ "F5 parar, F6 pausar, F7 retroceder, F8 avançar. F10: sair da mesa."
 )
 
@@ -198,14 +198,31 @@ func _handle_function_key(code: Key) -> void:
 		KEY_F2:
 			Speech.say(_players_summary(), true)
 		KEY_F3:
-			var room_id := str(_room.get("id", ""))
-			DisplayServer.clipboard_set(room_id)
-			Speech.say("Código da mesa: %s. Copiado." % A11y.spell(room_id), true)
+			_copy_invite()
 		KEY_F10:
 			Sfx.play("leave")
 			leave_requested.emit()
 		_:
 			_client.send_safety(SAFETY_KEYS[code])
+
+
+## Copia um convite pronto: endereço do servidor e código da mesa. Se o servidor é local a este
+## computador, pergunta a ele por quais endereços os amigos o alcançam (rede local, VPN).
+func _copy_invite() -> void:
+	var room_id := str(_room.get("id", ""))
+	var server: String = str(_client.http_base).trim_prefix("http://").trim_prefix("https://")
+	var loopback := server.begins_with("127.") or server.begins_with("localhost") or server.begins_with("[::1]")
+	var options: Array = []
+	if loopback:
+		for item in await _client.fetch_addresses():
+			options.append("%s (%s)" % [item["address"], item["name"]])
+	if options.is_empty():
+		options.append(server)
+	var invite := "Guacamole. Mesa %s.\nNo cliente, em Servidor use %s e depois Entrar em uma mesa com o código %s." % [
+		room_id, " ou ".join(options), room_id,
+	]
+	DisplayServer.clipboard_set(invite)
+	Speech.say("Convite copiado. Código %s. Servidor %s." % [A11y.spell(room_id), ", ou ".join(options)], true)
 
 
 func _handle_history_key(key: InputEventKey) -> bool:

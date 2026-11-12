@@ -357,3 +357,53 @@ Deno.test("voz: lugares na cena e repasse dos pacotes só aos outros", async () 
     await server.shutdown();
   }
 });
+
+Deno.test("mesa: exportar e importar leva cenas, fichas e compêndios para uma mesa nova", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const id = created.room.id;
+    const ana = await TestClient.connect(wsUrl(server.port, id, "Ana", created.hostToken));
+    const welcome = await ana.next("welcome");
+    ana.send({ type: "sheet:create", templateId: welcome.templates[0].id, name: "Rex" });
+    await ana.next("sheet:sync");
+    ana.send({ type: "scene:op", op: { type: "zone:add", id: "altar", name: "Altar", description: "", cells: [{ x: 1, y: 1 }] } });
+    await ana.next("scene:sync", (m) => m.scene.scenes[0].zones.length === 1);
+    ana.send({ type: "chat:send", input: "oi" });
+    await ana.next("chat:entry", (m) => m.entry.text === "oi");
+
+    const denied = await fetch(`${base}/api/rooms/${id}/export?token=errado`);
+    assertEquals(denied.status, 403);
+    await denied.body?.cancel();
+    const exported = await (await fetch(`${base}/api/rooms/${id}/export?token=${created.hostToken}`)).json();
+    assertEquals(exported.formato, "guacamole-mesa");
+    assertEquals(exported.mesa.history, []);
+    assert(!JSON.stringify(exported).includes(created.hostToken));
+    const withHistory = await (await fetch(`${base}/api/rooms/${id}/export?token=${created.hostToken}&history=1`)).json();
+    assert(withHistory.mesa.history.length > 0);
+
+    const bad = await fetch(`${base}/api/rooms/import?name=Bia`, { method: "POST", body: JSON.stringify({ x: 1 }) });
+    assertEquals(bad.status, 422);
+    await bad.body?.cancel();
+    const imported = await (await fetch(`${base}/api/rooms/import?name=Bia`, {
+      method: "POST",
+      body: JSON.stringify(exported),
+    })).json() as { room: { id: string }; hostToken: string; role: string };
+    assertEquals(imported.role, "host");
+    assert(imported.room.id !== id && imported.hostToken !== created.hostToken);
+
+    const bia = await TestClient.connect(wsUrl(server.port, imported.room.id, "Bia", imported.hostToken));
+    const copy = await bia.next("welcome");
+    assertEquals(copy.you.role, "host");
+    assertEquals(copy.scene.scenes[0].zones.map((z) => z.name), ["Altar"]);
+    assertEquals(copy.characters.map((c) => [c.name, c.owner]), [["Rex", "Bia"]]);
+    await bia.close();
+    await ana.close();
+
+    const info = await (await fetch(`${base}/api/address`)).json() as { addresses: unknown[] };
+    assert(Array.isArray(info.addresses));
+  } finally {
+    await server.shutdown();
+  }
+});

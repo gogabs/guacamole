@@ -24,7 +24,7 @@ import {
   WELCOME_HISTORY,
 } from "./room.ts";
 import { describeUpload, diskMediaStore, MAX_AUDIO_BYTES, MediaError, memoryMediaStore } from "./media.ts";
-import { loadRooms, saveRooms } from "./store.ts";
+import { exportRoom, importRoom, loadRooms, saveRooms } from "./store.ts";
 
 export interface ServerOptions {
   port?: number;
@@ -131,12 +131,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     id ? rooms.get(id.trim().toUpperCase()) : undefined;
 
   function createRoom(body: Record<string, unknown>): Response {
-    let id = "";
-    do {
-      id = [...crypto.getRandomValues(new Uint8Array(6))]
-        .map((byte) => ROOM_ALPHABET[byte % ROOM_ALPHABET.length])
-        .join("");
-    } while (rooms.has(id));
+    const id = newRoomId();
     const access: RoomAccess = body.access === "restricted" ? "restricted" : "open";
     const room = createRoomRecord(
       id,
@@ -147,6 +142,47 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     rooms.set(id, room);
     scheduleSave();
     return json({ room: summaryOf(room), hostToken: room.hostToken, role: "host" }, 201);
+  }
+
+  function newRoomId(): string {
+    let id = "";
+    do {
+      id = [...crypto.getRandomValues(new Uint8Array(6))]
+        .map((byte) => ROOM_ALPHABET[byte % ROOM_ALPHABET.length])
+        .join("");
+    } while (rooms.has(id));
+    return id;
+  }
+
+  /** Cria uma mesa a partir de um arquivo exportado; o corpo é o próprio arquivo. */
+  function importTable(body: Record<string, unknown>, url: URL): Response {
+    const room = importRoom(body, newRoomId(), normalizedPlayerName(url.searchParams.get("name")));
+    if (!room) return json({ message: "Esse arquivo não é uma mesa do Guacamole." }, 422);
+    rooms.set(room.id, room);
+    scheduleSave();
+    return json({ room: summaryOf(room), hostToken: room.hostToken, role: "host" }, 201);
+  }
+
+  function exportTable(room: RoomRecord, url: URL): Response {
+    if (url.searchParams.get("token") !== room.hostToken) {
+      return json({ message: "Apenas o anfitrião exporta a mesa." }, 403);
+    }
+    return json(exportRoom(room, url.searchParams.get("history") === "1"));
+  }
+
+  /** Endereços pelos quais os amigos podem alcançar este servidor (rede local, VPN). */
+  function addresses(port: number): Response {
+    const found: Array<{ name: string; address: string }> = [];
+    try {
+      for (const nic of Deno.networkInterfaces()) {
+        if (nic.family === "IPv4" && !nic.address.startsWith("127.") && !nic.address.startsWith("169.254.")) {
+          found.push({ name: nic.name, address: `${nic.address}:${port}` });
+        }
+      }
+    } catch {
+      // Sem permissão para listar as interfaces: o cliente cai no endereço que já usa.
+    }
+    return json({ addresses: found });
   }
 
   function updateRoom(room: RoomRecord, request: Request, body: Record<string, unknown>): Response {
@@ -317,6 +353,17 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
       if (url.pathname === "/api/rooms" && request.method === "POST") {
         return createRoom(await readBody(request));
+      }
+
+      if (url.pathname === "/api/rooms/import" && request.method === "POST") {
+        return importTable(await readBody(request), url);
+      }
+      if (url.pathname === "/api/address" && request.method === "GET") return addresses(Number(url.port) || 80);
+
+      const exportMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/export$/);
+      if (exportMatch && request.method === "GET") {
+        const room = roomFor(decodeURIComponent(exportMatch[1]));
+        return room ? exportTable(room, url) : json({ message: "Mesa não encontrada." }, 404);
       }
 
       const mediaMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/media(?:\/([0-9a-f]{64}))?$/);

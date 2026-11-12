@@ -3,8 +3,12 @@ extends Control
 ## Setas navegam, Enter escolhe. Itens com valor abrem um campo de edição que some ao confirmar.
 
 signal submitted(server: String, player_name: String, code: String)
+signal import_requested(server: String, player_name: String, path: String)
+signal update_requested
 
 const Store := preload("res://scripts/ui/store.gd")
+const SheetLibrary := preload("res://scripts/ui/sheet_library.gd")
+const Updater := preload("res://scripts/net/updater.gd")
 const ThemeFactory := preload("res://scripts/ui/theme_factory.gd")
 const Menu := preload("res://scripts/ui/menu.gd")
 const EditField := preload("res://scripts/ui/edit_field.gd")
@@ -20,6 +24,8 @@ var _edit_target := ""
 var _name_value := ""
 var _server_value := ""
 var _busy := false
+## Versão nova achada no GitHub, se já se sabe; main preenche antes de a tela abrir.
+var pending_update: Dictionary = {}
 
 
 func _ready() -> void:
@@ -50,14 +56,7 @@ func _ready() -> void:
 	_menu = Menu.new()
 	_menu.activated.connect(_on_activated)
 	column.add_child(_menu)
-	var items: Array[Dictionary] = [
-		{"id": "name", "label": "Nome", "value": _name_value},
-		{"id": "create", "label": "Criar mesa"},
-		{"id": "join", "label": "Entrar em uma mesa"},
-		{"id": "server", "label": "Servidor", "value": _server_value},
-		{"id": "quit", "label": "Sair"},
-	]
-	_menu.set_items(items)
+	_menu.set_items(_items_list())
 
 	# Campo de edição: escondido até o Enter num item com valor.
 	_edit_box = VBoxContainer.new()
@@ -74,10 +73,40 @@ func _ready() -> void:
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(_status)
 
-	var intro := "Guacamole. Menu principal. Setas navegam, Enter escolhe."
+	var intro := "Guacamole, versão %s. Menu principal. Setas navegam, Enter escolhe." % Updater.current_version()
+	if not pending_update.is_empty():
+		intro += " Há uma versão nova, %s, no primeiro item." % pending_update["version"]
 	_status.text = intro
 	Speech.say(intro, true)
 	_menu.announce_current(false)
+
+
+func _items_list() -> Array[Dictionary]:
+	var items: Array[Dictionary] = []
+	if not pending_update.is_empty():
+		items.append({"id": "update", "label": "Atualizar para a versão %s" % pending_update["version"]})
+	# Quem já jogou entra na mesma mesa com um Enter, sem digitar código nem endereço.
+	var last_room := Store.get_value("room", "")
+	if not last_room.is_empty():
+		var room_title := Store.get_value("room_name", "")
+		var shown := "%s, código %s" % [room_title, last_room] if not room_title.is_empty() else "código %s" % last_room
+		items.append({"id": "continue", "label": "Continuar a última mesa", "value": shown})
+	items.append({"id": "name", "label": "Nome", "value": _name_value})
+	items.append({"id": "create", "label": "Criar mesa"})
+	items.append({"id": "join", "label": "Entrar em uma mesa"})
+	items.append({"id": "import", "label": "Criar mesa a partir de um arquivo"})
+	items.append({"id": "server", "label": "Servidor", "value": _server_value})
+	items.append({"id": "quit", "label": "Sair"})
+	return items
+
+
+## Chega a notícia de uma versão nova (a consulta ao GitHub é assíncrona): o item entra no topo.
+func set_update(info: Dictionary) -> void:
+	if info.is_empty() or pending_update == info:
+		return
+	pending_update = info
+	_menu.set_items(_items_list())
+	show_status("Há uma versão nova, %s. Ela é o primeiro item do menu." % info["version"])
 
 
 func show_status(message: String, is_error: bool = false) -> void:
@@ -107,6 +136,22 @@ func _on_activated(item_id: String) -> void:
 		"join":
 			if _require_name():
 				_begin_edit("code", "Código da mesa", "")
+		"update":
+			update_requested.emit()
+		"continue":
+			if _require_name():
+				submitted.emit(_server_value, _name_value, Store.get_value("room", ""))
+		"import":
+			if _require_name():
+				var started := SheetLibrary.pick(false, "Escolher mesa", "", func(path: String) -> void:
+					if path.is_empty():
+						Speech.say("Cancelado.", true)
+						_menu.announce_current(false)
+					else:
+						import_requested.emit(_server_value, _name_value, path),
+					PackedStringArray(["*.guacamesa ; Mesa do Guacamole"]))
+				if not started:
+					show_status("Este sistema não oferece o seletor de arquivos.", true)
 		"quit":
 			get_tree().quit()
 

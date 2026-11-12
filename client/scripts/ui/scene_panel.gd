@@ -19,6 +19,8 @@ const FocusZone := preload("res://scripts/ui/focus_zone.gd")
 const SceneCanvas := preload("res://scripts/ui/scene_canvas.gd")
 const SheetLibrary := preload("res://scripts/ui/sheet_library.gd")
 const CardDetail := preload("res://scripts/ui/card_detail.gd")
+const SceneFile := preload("res://scripts/ui/scene_file.gd")
+const TableFile := preload("res://scripts/ui/table_file.gd")
 
 const SEGMENT_CHOICES := [4, 6, 8, 10, 12]
 const DURATION_PROMPT := "Duração: minutos e segundos como 2:30, ou só os minutos"
@@ -202,6 +204,10 @@ func _rebuild() -> void:
 		for scene in _client.scene.get("scenes", []):
 			_rows.append({"kind": "scene", "scene": scene})
 		_rows.append({"kind": "new_scene"})
+		if _is_host():
+			_rows.append({"kind": "save_scene"})
+			_rows.append({"kind": "load_scene"})
+			_rows.append({"kind": "save_table"})
 		_rows.append({"kind": "editors"})
 	else:
 		var scene := _active()
@@ -311,6 +317,12 @@ func _row_text(row: Dictionary) -> String:
 			]
 		"new_scene":
 			return "Nova cena"
+		"save_scene":
+			return "Salvar a cena ativa em arquivo"
+		"load_scene":
+			return "Carregar cena de arquivo"
+		"save_table":
+			return "Salvar a mesa inteira em arquivo"
 	return "Quem edita os cards: %s" % ("todos" if _client.scene.get("editors") == "everyone" else "só o anfitrião")
 
 
@@ -571,6 +583,14 @@ func _scenes_key(key: InputEventKey) -> bool:
 					_begin_edit("Nome da nova cena", "", func(text: String) -> void:
 						if not text.strip_edges().is_empty():
 							_op({"type": "scene:create", "id": _new_id(), "name": text}))
+				"save_scene":
+					_save_scene()
+				"load_scene":
+					_load_scene()
+				"save_table":
+					_begin_choice("Incluir o histórico do chat?",
+						[{"label": "Não, só a mesa", "value": false}, {"label": "Sim, com o histórico", "value": true}],
+						_save_table)
 				"editors":
 					var next := "host" if _client.scene.get("editors") == "everyone" else "everyone"
 					_op({"type": "scene:editors", "editors": next})
@@ -587,6 +607,63 @@ func _scenes_key(key: InputEventKey) -> bool:
 		_:
 			return false
 	return true
+
+
+# --- Cena em arquivo -----------------------------------------------------------------------
+
+func _save_scene() -> void:
+	var scene := _active()
+	var suggested := "%s.%s" % [str(scene["name"]), SceneFile.EXTENSION]
+	var started := SheetLibrary.pick(true, "Salvar cena", suggested, func(path: String) -> void:
+		if path.is_empty():
+			Speech.say("Cancelado.", true)
+			return
+		if path.get_extension().to_lower() != SceneFile.EXTENSION:
+			path += "." + SceneFile.EXTENSION
+		Speech.say("Salvando a cena.", true)
+		var result: Dictionary = await SceneFile.save(_client, scene, path)
+		Sfx.play("msg_out" if result["ok"] else "error")
+		Speech.say(str(result["message"]), true),
+		PackedStringArray(["*.%s ; Cena do Guacamole" % SceneFile.EXTENSION]))
+	if not started:
+		Sfx.play("error")
+		Speech.say("Este sistema não oferece o seletor de arquivos.", true)
+
+
+func _save_table(include_history: bool) -> void:
+	var suggested := "%s.%s" % [str(_client.room.get("name", "Mesa")), TableFile.EXTENSION]
+	var started := SheetLibrary.pick(true, "Salvar mesa", suggested, func(path: String) -> void:
+		if path.is_empty():
+			Speech.say("Cancelado.", true)
+			return
+		if path.get_extension().to_lower() != TableFile.EXTENSION:
+			path += "." + TableFile.EXTENSION
+		Speech.say("Salvando a mesa.", true)
+		var result: Dictionary = await TableFile.save(_client, path, include_history)
+		Sfx.play("msg_out" if result["ok"] else "error")
+		Speech.say(str(result["message"]), true),
+		PackedStringArray(["*.%s ; Mesa do Guacamole" % TableFile.EXTENSION]))
+	if not started:
+		Sfx.play("error")
+		Speech.say("Este sistema não oferece o seletor de arquivos.", true)
+
+
+func _load_scene() -> void:
+	var started := SheetLibrary.pick(false, "Carregar cena", "", func(path: String) -> void:
+		if path.is_empty():
+			Speech.say("Cancelado.", true)
+			return
+		Speech.say("Carregando a cena.", true)
+		_announce_next = true
+		var result: Dictionary = await SceneFile.load_file(_client, path, _new_id())
+		if not result["ok"]:
+			_announce_next = false
+			Sfx.play("error")
+			Speech.say(str(result["message"]), true),
+		PackedStringArray(["*.%s ; Cena do Guacamole" % SceneFile.EXTENSION]))
+	if not started:
+		Sfx.play("error")
+		Speech.say("Este sistema não oferece o seletor de arquivos.", true)
 
 
 # --- Ações nos cards -----------------------------------------------------------------------

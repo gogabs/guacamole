@@ -375,3 +375,25 @@ Deno.test("lista de verificação: marcar, editar e remover itens", () => {
   // Estado guardado volta intacto.
   assertEquals(normalizeSceneState(JSON.parse(JSON.stringify(state))).scenes[0].cards[0].checklist, state.scenes[0].cards[0].checklist);
 });
+
+Deno.test("cena: importar traz zonas, cards e mídia, sem som tocando e só para o anfitrião", () => {
+  const known = (id: string, kind: string) => id === "wav" ? kind === "audio" : id === "png" && kind === "image";
+  let source = createSceneState();
+  const run = (op: Parameters<typeof applySceneOp>[1]) => source = applySceneOp(source, op, true, known, 500).state;
+  run({ type: "scene:background", sceneId: source.activeId, mediaId: "png" });
+  run({ type: "zone:add", id: "z1", name: "Altar", description: "", cells: [{ x: 0, y: 0 }] });
+  run({ type: "card:add", id: "fogo", title: "Fogo", text: "", kind: "audio", mediaId: "wav", mode: "ambient", zoneId: "z1" } as never);
+  run({ type: "audio:play", cardId: "fogo" });
+  const saved = JSON.parse(JSON.stringify(source.scenes[0]));
+
+  const state = createSceneState();
+  assertThrows(() => applySceneOp(state, { type: "scene:import", id: "nova", scene: saved }, false, known), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "scene:import", id: "nova", scene: saved }, true, () => false), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "scene:import", id: "nova", scene: "lixo" }, true, known), SceneError);
+  const loaded = applySceneOp(state, { type: "scene:import", id: "nova", scene: saved }, true, known).state;
+  assertEquals(loaded.activeId, "nova");
+  const scene = loaded.scenes[1];
+  assertEquals([scene.id, scene.background, scene.zones.length, scene.cards[0].zoneId], ["nova", "png", 1, "z1"]);
+  assertEquals(scene.cards[0].audio?.playing, false);
+  assertThrows(() => applySceneOp(loaded, { type: "scene:import", id: "nova", scene: saved }, true, known), SceneError);
+});

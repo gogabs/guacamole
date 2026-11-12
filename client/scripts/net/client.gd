@@ -73,6 +73,33 @@ func create_room(room_name: String, host_name: String) -> Dictionary:
 	return await _request(HTTPClient.METHOD_POST, "/api/rooms", {"name": room_name, "hostName": host_name})
 
 
+## O arquivo da mesa inteira (sem a mídia), só para o anfitrião: {ok, data, message}.
+func export_room(include_history: bool) -> Dictionary:
+	var path := "/api/rooms/%s/export?token=%s&history=%d" % [str(room.get("id", "")).uri_encode(), _token.uri_encode(), 1 if include_history else 0]
+	return await _request(HTTPClient.METHOD_GET, path, {})
+
+
+## Cria uma mesa nova a partir de um arquivo exportado e envia a mídia dela.
+## `media` mapeia o nome do arquivo (hash) para os bytes. Devolve {ok, code, token, message}.
+func import_room(table: Dictionary, media: Dictionary, host_name: String) -> Dictionary:
+	var created: Dictionary = await _request(HTTPClient.METHOD_POST, "/api/rooms/import?name=%s" % host_name.uri_encode(), table)
+	if not created["ok"]:
+		return {"ok": false, "code": "", "token": "", "message": created["message"]}
+	var code := str(created["data"]["room"]["id"])
+	var token := str(created["data"]["hostToken"])
+	for file_name in media:
+		var sent: Dictionary = await _upload(code, host_name, token, media[file_name], str(file_name))
+		if not sent["ok"]:
+			return {"ok": false, "code": "", "token": "", "message": str(sent["message"])}
+	return {"ok": true, "code": code, "token": token, "message": ""}
+
+
+## Endereços pelos quais outras pessoas alcançam este servidor ("192.168.0.5:8000"), se ele souber dizer.
+func fetch_addresses() -> Array:
+	var result: Dictionary = await _request(HTTPClient.METHOD_GET, "/api/address", {})
+	return result["data"].get("addresses", []) if result["ok"] else []
+
+
 func check_join(room_id: String, player_name: String, token: String) -> Dictionary:
 	var body := {"name": player_name}
 	if not token.is_empty():
@@ -205,12 +232,36 @@ func upload_media(path: String) -> Dictionary:
 	var bytes := FileAccess.get_file_as_bytes(path)
 	if bytes.is_empty():
 		return {"ok": false, "id": "", "message": "Não foi possível ler o arquivo."}
-	var query := "?name=%s&filename=%s" % [str(you.get("name", "")).uri_encode(), path.get_file().uri_encode()]
-	if not _token.is_empty():
-		query += "&token=" + _token.uri_encode()
+	return await upload_bytes(bytes, path.get_file())
+
+
+## Baixa o arquivo bruto de uma mídia da mesa. Vazio se não conseguir.
+func download_bytes(media_id: String) -> PackedByteArray:
 	var request := HTTPRequest.new()
 	add_child(request)
-	var url := "%s/api/rooms/%s/media%s" % [http_base, str(room.get("id", "")).uri_encode(), query]
+	var url := "%s/api/rooms/%s/media/%s" % [http_base, str(room.get("id", "")).uri_encode(), media_id.uri_encode()]
+	if request.request(url) != OK:
+		request.queue_free()
+		return PackedByteArray()
+	var result: Array = await request.request_completed
+	request.queue_free()
+	if result[0] != HTTPRequest.RESULT_SUCCESS or int(result[1]) != 200:
+		return PackedByteArray()
+	return result[3]
+
+
+## Como `upload_media`, mas a partir dos bytes já lidos.
+func upload_bytes(bytes: PackedByteArray, filename: String) -> Dictionary:
+	return await _upload(str(room.get("id", "")), str(you.get("name", "")), _token, bytes, filename)
+
+
+func _upload(room_id: String, player_name: String, token: String, bytes: PackedByteArray, filename: String) -> Dictionary:
+	var query := "?name=%s&filename=%s" % [player_name.uri_encode(), filename.uri_encode()]
+	if not token.is_empty():
+		query += "&token=" + token.uri_encode()
+	var request := HTTPRequest.new()
+	add_child(request)
+	var url := "%s/api/rooms/%s/media%s" % [http_base, room_id.uri_encode(), query]
 	if request.request_raw(url, PackedStringArray(), HTTPClient.METHOD_POST, bytes) != OK:
 		request.queue_free()
 		return {"ok": false, "id": "", "message": "Não foi possível contatar o servidor."}
@@ -427,7 +478,8 @@ func _request(method: int, path: String, body: Dictionary) -> Dictionary:
 	var request := HTTPRequest.new()
 	add_child(request)
 	var headers := PackedStringArray(["Content-Type: application/json"])
-	if request.request(http_base + path, headers, method, JSON.stringify(body)) != OK:
+	var payload := "" if method == HTTPClient.METHOD_GET else JSON.stringify(body)
+	if request.request(http_base + path, headers, method, payload) != OK:
 		request.queue_free()
 		return {"ok": false, "status": 0, "data": {}, "message": "Não foi possível contatar o servidor."}
 	var result: Array = await request.request_completed

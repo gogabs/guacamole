@@ -164,6 +164,8 @@ export interface SceneState {
 
 export type SceneOp =
   | { type: "scene:create"; id: string; name: string }
+  /** Traz uma cena de arquivo; a mídia que ela usa já deve estar na mesa. */
+  | { type: "scene:import"; id: string; scene: unknown }
   | { type: "scene:rename"; sceneId: string; name: string }
   | { type: "scene:activate"; sceneId: string }
   | { type: "scene:delete"; sceneId: string }
@@ -235,6 +237,7 @@ export type SceneOp =
 
 export const SCENE_OP_TYPES = [
   "scene:create",
+  "scene:import",
   "scene:rename",
   "scene:activate",
   "scene:delete",
@@ -376,6 +379,32 @@ export function applySceneOp(
       return {
         state: { ...leaving, scenes: [...leaving.scenes, newScene(op.id, name)], activeId: op.id },
         message: (who) => `${who} criou a cena ${name}.`,
+      };
+    }
+    case "scene:import": {
+      hostOnly();
+      if (state.scenes.length >= MAX_SCENES) throw new SceneError(`Limite de ${MAX_SCENES} cenas.`);
+      if (state.scenes.some((s) => s.id === op.id)) throw new SceneError("Já existe uma cena com esse id.");
+      const raw = op.scene as Record<string, unknown> | null;
+      if (typeof raw !== "object" || raw === null || !Array.isArray(raw.cards)) {
+        throw new SceneError("Arquivo de cena inválido.");
+      }
+      const imported = normalizeSceneState({ scenes: [{ ...raw, id: op.id }] }).scenes[0];
+      if (imported.id !== op.id) throw new SceneError("Arquivo de cena inválido.");
+      if (imported.background !== null && !hasMedia(imported.background, "image")) {
+        throw new SceneError("O plano de fundo da cena não foi enviado à mesa.");
+      }
+      for (const card of imported.cards) {
+        if (card.mediaId !== null && !hasMedia(card.mediaId, card.kind === "audio" ? "audio" : "image")) {
+          throw new SceneError(`A mídia do card ${card.title} não foi enviada à mesa.`);
+        }
+      }
+      // Nada chega tocando: o anfitrião liga o que quiser, no momento certo.
+      const quiet: Scene = { ...imported, cards: imported.cards.map(stopped) };
+      const leaving = patchScene(active.id, { cards: active.cards.map(stopped) });
+      return {
+        state: { ...leaving, scenes: [...leaving.scenes, quiet], activeId: quiet.id },
+        message: (who) => `${who} carregou a cena ${quiet.name}.`,
       };
     }
     case "scene:rename": {

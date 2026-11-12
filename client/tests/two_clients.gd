@@ -155,6 +155,99 @@ func _voice_tests(table: Control, ana: Node) -> void:
 	voice.set_mode("off")
 
 
+func _updater_tests() -> void:
+	const Updater := preload("res://scripts/net/updater.gd")
+	_check(Updater.is_newer("0.2.0", "0.1.9") and Updater.is_newer("v1.0.0", "0.9.9") and Updater.is_newer("0.1.10", "0.1.9"), "versões novas são reconhecidas")
+	_check(not Updater.is_newer("0.1.0", "0.1.0") and not Updater.is_newer("0.1", "0.1.0") and not Updater.is_newer("0.0.9", "0.1.0"), "a mesma versão ou mais velha não atualiza")
+	var release := {
+		"tag_name": "v0.2.0", "draft": false, "prerelease": false, "body": "Novidades",
+		"assets": [
+			{"name": "Guacamole-servidor.zip", "browser_download_url": "https://x/s.zip", "size": 5},
+			{"name": Updater.ASSET, "browser_download_url": "https://x/c.zip", "size": 10, "digest": "sha256:abc123"},
+		],
+	}
+	var info := Updater.parse_release(release)
+	_check(info["version"] == "0.2.0" and info["url"] == "https://x/c.zip" and info["digest"] == "abc123" and info["size"] == 10, "a release vira versão, endereço e hash do zip do cliente")
+	_check(Updater.parse_release({"tag_name": "v9", "assets": []}).is_empty(), "release sem o zip do cliente é ignorada")
+	release["prerelease"] = true
+	_check(Updater.parse_release(release).is_empty(), "pré-lançamento é ignorado")
+	_check(not Updater.can_install(), "pelo editor ou testes não há o que trocar")
+	_check(Updater.current_version() == "0.1.0", "a versão do programa vem do projeto")
+
+
+func _scene_file_tests(ana: Node, table: Control) -> void:
+	const SceneFile := preload("res://scripts/ui/scene_file.gd")
+	var active: Dictionary = {}
+	for scene in ana.scene["scenes"]:
+		if scene["id"] == ana.scene["activeId"]:
+			active = scene
+	var count: int = (active["cards"] as Array).size()
+	var media := SceneFile.media_ids(active).size()
+	# Um som tocando e uma imagem de fundo entram no arquivo; o som sai parado.
+	var path := "user://teste.guacascene"
+	var saved: Dictionary = await SceneFile.save(ana, active, path)
+	_check(saved["ok"], "Ana salva a cena ativa em arquivo (%s)" % saved["message"])
+	var zip := ZIPReader.new()
+	_check(zip.open(path) == OK and zip.file_exists("cena.json"), "o arquivo é um zip com cena.json")
+	var in_zip := Array(zip.get_files()).filter(func(f: String) -> bool: return f.begins_with("midia/") and not f.ends_with("/"))
+	_check(in_zip.size() == media, "o zip leva %d arquivo(s) de mídia" % media)
+	zip.close()
+
+	var before: int = (ana.scene["scenes"] as Array).size()
+	var loaded: Dictionary = await SceneFile.load_file(ana, path, "carregada")
+	_check(loaded["ok"], "Ana carrega o arquivo (%s)" % loaded["message"])
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"] as Array).size() == before + 1 and ana.scene["activeId"] == "carregada"), "a cena carregada vira a ativa")
+	var copy: Dictionary = {}
+	for scene in ana.scene["scenes"]:
+		if scene["id"] == "carregada":
+			copy = scene
+	_check((copy["cards"] as Array).size() == count and (copy["zones"] as Array).size() == (active["zones"] as Array).size(), "cards e zonas voltam iguais")
+	var playing := (copy["cards"] as Array).filter(func(c: Dictionary) -> bool: return c.get("audio") is Dictionary and c["audio"]["playing"])
+	_check(playing.is_empty(), "nenhum som volta tocando")
+	var garbage := FileAccess.open("user://lixo.guacascene", FileAccess.WRITE)
+	garbage.store_string("não é zip")
+	garbage.close()
+	var refused: Dictionary = await SceneFile.load_file(ana, "user://lixo.guacascene", "x")
+	_check(not refused["ok"], "um arquivo qualquer é recusado")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://lixo.guacascene"))
+	var panel: Control = table._scene
+	panel._scenes_view = true
+	panel._rebuild()
+	var rows: Array = panel._rows.map(func(r: Dictionary) -> String: return r["kind"])
+	_check(rows.has("new_scene") and not rows.has("save_scene") and not rows.has("load_scene"), "quem não é anfitrião não vê salvar nem carregar")
+	panel._scenes_view = false
+	panel._rebuild()
+
+	# A mesa inteira: salvar, importar como mesa nova e entrar nela.
+	const TableFile := preload("res://scripts/ui/table_file.gd")
+	const StoreScript := preload("res://scripts/ui/store.gd")
+	_check(StoreScript.get_value("room") == str(ana.room["id"]), "o cliente lembra da última mesa")
+	var table_path := "user://teste.guacamesa"
+	var table_saved: Dictionary = await TableFile.save(ana, table_path, true)
+	_check(table_saved["ok"], "Ana salva a mesa inteira (%s)" % table_saved["message"])
+	var table_zip := ZIPReader.new()
+	_check(table_zip.open(table_path) == OK and table_zip.file_exists("mesa.json"), "o arquivo da mesa é um zip com mesa.json")
+	table_zip.close()
+	var dora := preload("res://scripts/net/client.gd").new()
+	table.get_tree().root.add_child(dora)
+	dora.configure(ana.http_base)
+	var made: Dictionary = await TableFile.import_file(dora, table_path, "Dora")
+	_check(made["ok"] and made["code"] != str(ana.room["id"]), "importar cria uma mesa com outro código (%s)" % made["message"])
+	dora.connect_to_room(made["code"], "Dora", made["token"])
+	_check(await _wait(func() -> bool: return not dora.you.is_empty()), "Dora entra na mesa importada")
+	_check(dora.you.get("role") == "host", "quem importa é o anfitrião")
+	_check((dora.scene["scenes"] as Array).size() == (ana.scene["scenes"] as Array).size(), "as cenas vieram")
+	_check(dora.characters.size() == ana.characters.size(), "as fichas vieram")
+	var first_media: Array = SceneFile.media_ids(copy)
+	_check(first_media.is_empty() or not (await dora.download_bytes(str(first_media[0]))).is_empty(), "a mídia da mesa foi enviada junto")
+	var not_a_table: Dictionary = await TableFile.import_file(dora, "user://teste.guacascene", "Dora")
+	_check(not not_a_table["ok"], "um arquivo de cena não vale como mesa")
+	dora.leave()
+	dora.queue_free()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(table_path))
+
+
 func _run() -> void:
 	# Em _initialize a árvore ainda não está ativa (HTTPRequest recusa pedidos).
 	await process_frame
@@ -919,6 +1012,9 @@ func _run() -> void:
 	await _key(KEY_SLASH, KEY_SLASH, 47)
 	_check(table._composer.text == "/", "barra de teclado US abre o campo já com /")
 	table._close_input()
+
+	_updater_tests()
+	await _scene_file_tests(ana, table)
 
 	app.queue_free()
 	ana.leave()

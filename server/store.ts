@@ -38,6 +38,60 @@ function normalizeCharacter(character: RoomRecord["characters"][number]): RoomRe
   return template ? { ...migrateCharacter(template, described), owner: character.owner } : described;
 }
 
+const TABLE_FORMAT = "guacamole-mesa";
+
+/** A mesa sem segredos (código e token) para virar arquivo; a mídia vai à parte, em bytes. */
+export function exportRoom(room: RoomRecord, includeHistory: boolean): Record<string, unknown> {
+  return {
+    formato: TABLE_FORMAT,
+    versao: 1,
+    mesa: {
+      name: room.name,
+      hostName: room.hostName,
+      access: room.access,
+      allowedNames: room.allowedNames,
+      characters: room.characters,
+      scene: room.scene,
+      compendiums: room.compendiums,
+      media: room.media,
+      history: includeHistory ? room.history : [],
+      nextSeq: includeHistory ? room.nextSeq : 1,
+    },
+  };
+}
+
+/**
+ * Uma mesa nova a partir de um arquivo exportado: outro código, outro token e `hostName` como
+ * anfitrião. As fichas do anfitrião de antes passam a ser dele; nenhum som volta tocando; a mídia
+ * começa vazia, porque os bytes são enviados depois, um a um.
+ */
+export function importRoom(file: unknown, id: string, hostName: string): RoomRecord | null {
+  const raw = (file as { formato?: unknown; mesa?: unknown } | null);
+  if (!raw || raw.formato !== TABLE_FORMAT || typeof raw.mesa !== "object" || raw.mesa === null) return null;
+  const table = raw.mesa as Record<string, unknown>;
+  const room = normalizeRoom({
+    ...table,
+    id,
+    hostName,
+    hostToken: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    media: [],
+  });
+  if (!room) return null;
+  const formerHost = typeof table.hostName === "string" ? table.hostName : "";
+  room.characters = room.characters.map((c) => c.owner === formerHost ? { ...c, owner: hostName } : c);
+  room.scene = {
+    ...room.scene,
+    scenes: room.scene.scenes.map((s) => ({
+      ...s,
+      cards: s.cards.map((c) =>
+        c.audio?.playing ? { ...c, audio: { ...c.audio, playing: false, startedAt: null } } : c
+      ),
+    })),
+  };
+  return room;
+}
+
 function normalizeRoom(value: unknown): RoomRecord | null {
   if (typeof value !== "object" || value === null) return null;
   const raw = value as Record<string, unknown>;

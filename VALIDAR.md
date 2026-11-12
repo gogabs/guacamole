@@ -42,6 +42,29 @@ Marque ao validar e apague o que já foi confirmado.
 - [ ] Campos de número só aceitam dígitos (e um menos onde o valor pode ser negativo); a duração aceita dois pontos.
 - [ ] O campo de chat devolve o foco para a região de onde saiu, ao enviar e ao cancelar.
 
+## Salvar e carregar cena
+- [ ] Na lista de cenas (anfitrião): "Salvar a cena ativa em arquivo" abre o diálogo de salvar e cria um `.guacascene`.
+- [ ] "Carregar cena de arquivo" abre o diálogo, a cena entra como ativa, com fundo, zonas, cards e sons, e todos veem.
+- [ ] Os sons voltam parados; o fim de um temporizador que estava rodando não dispara sozinho.
+- [ ] Carregar a mesma cena duas vezes cria duas cenas; um arquivo qualquer é recusado com mensagem.
+- [ ] Carregar uma cena com imagens e sons grandes: o tempo de envio e a fala de progresso são aceitáveis.
+- [ ] Jogadores que não são anfitriões não veem as duas linhas.
+
+## Atualizador
+- [ ] Com uma release mais nova que a versão do programa, o menu inicial mostra "Atualizar para a versão X" no topo e a fala avisa.
+- [ ] Enter baixa (o progresso é falado de 20 em 20%), confere o hash, fecha o programa e ele reabre já na versão nova.
+- [ ] Os arquivos antigos foram trocados e as configurações (nome, mesas, vozes) continuaram.
+- [ ] Sem internet ou sem release nova, o menu fica como sempre, sem erro.
+- [ ] Rodando pelo editor, nada é oferecido.
+
+## Mesa pronta
+- [ ] Menu inicial: depois de jogar uma vez, o primeiro item é "Continuar a última mesa, nome e código"; Enter entra direto (como anfitrião, se for a sua).
+- [ ] F3 na mesa copia o convite com o endereço (rede local, Radmin) e o código; colar no WhatsApp e conferir o texto.
+- [ ] Cena, "Salvar a mesa inteira em arquivo": pergunta pelo histórico e grava `.guacamesa` pelo diálogo nativo.
+- [ ] Menu inicial, "Criar mesa a partir de um arquivo": a mesa volta com cenas, fichas (as do antigo anfitrião passam para você), compêndios e mídia, com outro código.
+- [ ] Os sons da mesa importada voltam parados; o chat vem vazio ou com o histórico, conforme a escolha.
+- [ ] Amigos entram na mesa importada pelo novo código sem configurar nada além do endereço.
+
 ## Chat de voz
 - [ ] Região Áudio: "Voz: desligado"; Enter alterna entre desligado, push-to-talk e microfone aberto (o Windows pode pedir permissão ao microfone).
 - [ ] Push-to-talk: segurar F4 fala e soltar para; o clique de início e fim é ouvido.
