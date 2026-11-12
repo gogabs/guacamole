@@ -52,7 +52,9 @@ New-Item -ItemType Directory -Force "$out/cliente" | Out-Null
 
 godot --headless --path client --export-release "Windows Desktop" "$out/cliente/Guacamole.exe"
 if (-not (Test-Path "$out/cliente/Guacamole.exe")) { throw "A exportação do cliente falhou." }
-Compress-Archive -Path "$out/cliente/*" -DestinationPath "$out/Guacamole-cliente-windows.zip" -Force
+# A exportação às vezes deixa temporários (*.tmp, *~RF*.TMP) ao lado do executável; eles não vão no zip.
+$real = Get-ChildItem "$out/cliente" -File | Where-Object { $_.Extension -ine ".tmp" }
+Compress-Archive -Path $real.FullName -DestinationPath "$out/Guacamole-cliente-windows.zip" -Force
 
 # Servidor: o código-fonte que o Deno roda, sem testes.
 $srv = "$out/servidor"
