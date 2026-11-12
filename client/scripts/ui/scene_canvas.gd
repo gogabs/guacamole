@@ -84,6 +84,8 @@ func _draw() -> void:
 			var spot: Dictionary = cells[index % cells.size()]
 			var center := area.position + Vector2((spot["x"] + 0.5) * cell.x, (spot["y"] + 0.55) * cell.y)
 			center.x += float(index / cells.size()) * 6.0
+			if card.get("at") is Dictionary:
+				center = area.position + Vector2(float(card["at"]["x"]) * cell.x, float(card["at"]["y"]) * cell.y)
 			_draw_token(card, center, minf(cell.x, cell.y) * 0.32, color, font)
 			index += 1
 

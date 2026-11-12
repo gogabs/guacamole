@@ -1,7 +1,8 @@
 //! Codec de voz do Guacamole: reduz ruido (RNNoise) e comprime em Opus.
 //!
 //! O Godot captura e toca o audio; esta extensao so transforma. Tudo trabalha em mono,
-//! 48 kHz, quadros de 20 ms (480 amostras), o que o RNNoise e o Opus esperam.
+//! 48 kHz. O RNNoise processa quadros de 10 ms (480 amostras) e cada pacote Opus leva dois deles,
+//! 20 ms (960 amostras), ou seja, 50 pacotes por segundo.
 
 use std::collections::HashMap;
 
@@ -11,6 +12,7 @@ use opus::{Application, Channels, Decoder, Encoder};
 
 const RATE: u32 = 48_000;
 const FRAME: usize = 480;
+const PACKET: usize = FRAME * 2;
 const MAX_PACKET: usize = 400;
 
 struct GuacamoleVoice;
@@ -100,25 +102,29 @@ impl VoiceCodec {
 
         let mut packets = Array::new();
         let mut taken = 0;
-        while self.pending.len() - taken >= FRAME {
-            let mut input = [0.0f32; FRAME];
-            for (dst, src) in input.iter_mut().zip(&self.pending[taken..taken + FRAME]) {
-                *dst = src * 32_768.0;
-            }
-            taken += FRAME;
-            let mut clean = [0.0f32; FRAME];
-            if self.suppress {
-                self.denoise.process_frame(&mut clean, &input);
-            } else {
-                clean = input;
-            }
-            let mut norm = [0.0f32; FRAME];
+        while self.pending.len() - taken >= PACKET {
+            // O RNNoise trabalha em quadros de 10 ms; cada pacote Opus leva dois deles (20 ms).
+            let mut norm = [0.0f32; PACKET];
             let mut energy = 0.0f32;
-            for (dst, src) in norm.iter_mut().zip(clean.iter()) {
-                *dst = (src / 32_768.0).clamp(-1.0, 1.0);
-                energy += *dst * *dst;
+            for half in 0..PACKET / FRAME {
+                let from = taken + half * FRAME;
+                let mut input = [0.0f32; FRAME];
+                for (dst, src) in input.iter_mut().zip(&self.pending[from..from + FRAME]) {
+                    *dst = src * 32_768.0;
+                }
+                let mut clean = [0.0f32; FRAME];
+                if self.suppress {
+                    self.denoise.process_frame(&mut clean, &input);
+                } else {
+                    clean = input;
+                }
+                for (dst, src) in norm[half * FRAME..(half + 1) * FRAME].iter_mut().zip(clean.iter()) {
+                    *dst = (src / 32_768.0).clamp(-1.0, 1.0);
+                    energy += *dst * *dst;
+                }
             }
-            self.level = (energy / FRAME as f32).sqrt();
+            taken += PACKET;
+            self.level = (energy / PACKET as f32).sqrt();
             let mut buf = [0u8; MAX_PACKET];
             if let Ok(n) = self.encoder.encode_float(&norm, &mut buf) {
                 packets.push(&PackedByteArray::from(&buf[..n]));
@@ -128,9 +134,10 @@ impl VoiceCodec {
         packets
     }
 
-    /// Descodifica um pacote de `peer` para amostras estereo a 48 kHz.
+    /// Descodifica um pacote de `peer` para amostras estereo a 48 kHz, com o ganho de cada lado
+    /// (1.0 e 1.0 deixa a voz no centro, sem alteracao).
     #[func]
-    fn decode(&mut self, peer: GString, packet: PackedByteArray) -> PackedVector2Array {
+    fn decode(&mut self, peer: GString, packet: PackedByteArray, left: f32, right: f32) -> PackedVector2Array {
         let key = peer.to_string();
         if !self.decoders.contains_key(&key) {
             match Decoder::new(RATE, Channels::Mono) {
@@ -145,7 +152,7 @@ impl VoiceCodec {
         };
         let mut pcm = [0.0f32; FRAME * 6];
         match decoder.decode_float(packet.as_slice(), &mut pcm, false) {
-            Ok(n) => pcm[..n].iter().map(|s| Vector2::new(*s, *s)).collect(),
+            Ok(n) => pcm[..n].iter().map(|s| Vector2::new(*s * left, *s * right)).collect(),
             Err(_) => PackedVector2Array::new(),
         }
     }

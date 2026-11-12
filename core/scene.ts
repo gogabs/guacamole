@@ -122,6 +122,16 @@ export interface SceneCard {
   clock: { segments: number; filled: number } | null;
   /** Zona onde o card está; `null` é a coluna de cards soltos. */
   zoneId: string | null;
+  /**
+   * Ponto exato dentro da zona, em células do grid (2.5 é o meio da terceira coluna). `null` é o
+   * centro da zona. Sempre dentro da caixa que cerca as células da zona.
+   */
+  at: SpotPoint | null;
+}
+
+export interface SpotPoint {
+  x: number;
+  y: number;
 }
 
 export interface GridCell {
@@ -224,6 +234,8 @@ export type SceneOp =
   | { type: "card:remove"; cardId: string }
   /** Põe o card numa zona (token) ou o solta na coluna (`zoneId: null`). */
   | { type: "card:place"; cardId: string; zoneId: string | null }
+  /** Põe o card num ponto exato da zona onde está (`at: null` volta ao centro). Só o anfitrião. */
+  | { type: "card:spot"; cardId: string; at: SpotPoint | null }
   | { type: "card:clock"; cardId: string; filled: number }
   /** Só o anfitrião controla o áudio. Efeitos disparam sem mudar o estado. */
   | { type: "audio:play"; cardId: string }
@@ -252,6 +264,7 @@ export const SCENE_OP_TYPES = [
   "card:edit",
   "card:remove",
   "card:place",
+  "card:spot",
   "card:clock",
   "card:counter",
   "card:timer",
@@ -471,7 +484,7 @@ export function applySceneOp(
       const inside = (c: GridCell) => c.x < grid.cols && c.y < grid.rows;
       const zones = scene.zones.map((z) => ({ ...z, cells: z.cells.filter(inside) })).filter((z) => z.cells.length > 0);
       const kept = new Set(zones.map((z) => z.id));
-      const cards = scene.cards.map((c) => (c.zoneId !== null && !kept.has(c.zoneId) ? { ...c, zoneId: null } : c));
+      const cards = scene.cards.map((c) => (c.zoneId !== null && !kept.has(c.zoneId) ? { ...c, zoneId: null, at: null } : keepSpot(c, zones)));
       return {
         state: patchScene(scene.id, { grid, zones, cards }),
         message: (who) => `${who} mudou o grid da cena ${scene.name} para ${grid.cols} por ${grid.rows}.`,
@@ -492,7 +505,10 @@ export function applySceneOp(
       const old = zoneById(op.zoneId);
       const zone = cleanZone(active, old.id, op.name, op.description, op.cells);
       return {
-        state: patchScene(active.id, { zones: active.zones.map((z) => (z.id === old.id ? zone : z)) }),
+        state: patchScene(active.id, {
+          zones: active.zones.map((z) => (z.id === old.id ? zone : z)),
+          cards: active.cards.map((c) => (c.zoneId === zone.id ? keepSpot(c, [zone]) : c)),
+        }),
         message: (who) => `${who} editou a zona ${zone.name}.`,
       };
     }
@@ -502,7 +518,7 @@ export function applySceneOp(
       return {
         state: patchScene(active.id, {
           zones: active.zones.filter((z) => z.id !== zone.id),
-          cards: active.cards.map((c) => (c.zoneId === zone.id ? { ...c, zoneId: null } : c)),
+          cards: active.cards.map((c) => (c.zoneId === zone.id ? { ...c, zoneId: null, at: null } : c)),
         }),
         message: (who) => `${who} removeu a zona ${zone.name}.`,
       };
@@ -571,9 +587,23 @@ export function applySceneOp(
       const zoneId = zoneIdOrNull(op.zoneId);
       const zone = zoneId === null ? null : zoneById(zoneId);
       return {
-        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, zoneId } : c))),
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, zoneId, at: null } : c))),
         message: (who) =>
           card.hidden ? "" : zone ? `${who} pôs ${card.title} na zona ${zone.name}.` : `${who} soltou ${card.title} da zona.`,
+      };
+    }
+    case "card:spot": {
+      hostOnly();
+      const card = cardById(op.cardId);
+      if (card.zoneId === null) throw new SceneError("Ponha o card numa zona antes de posicioná-lo.");
+      let at: SpotPoint | null = null;
+      if (op.at !== null && op.at !== undefined) {
+        if (!Number.isFinite(op.at.x) || !Number.isFinite(op.at.y)) throw new SceneError("Posição inválida.");
+        at = clampSpot(zoneById(card.zoneId), op.at);
+      }
+      return {
+        state: withActive(active.cards.map((c) => (c.id === card.id ? { ...c, at } : c))),
+        message: () => "",
       };
     }
     case "card:counter": {
@@ -822,7 +852,35 @@ function cleanCard(id: string, title: unknown, text: unknown): SceneCard {
     poll: null,
     checklist: null,
     zoneId: null,
+    at: null,
   };
+}
+
+/** A caixa que cerca as células da zona, em células do grid: de `x0` a `x1` e de `y0` a `y1`. */
+function zoneBox(zone: Zone): { x0: number; y0: number; x1: number; y1: number } {
+  const xs = zone.cells.map((c) => c.x);
+  const ys = zone.cells.map((c) => c.y);
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs) + 1, y1: Math.max(...ys) + 1 };
+}
+
+/** `point` dentro da caixa da zona, com duas casas decimais. */
+function clampSpot(zone: Zone, point: SpotPoint): SpotPoint {
+  const box = zoneBox(zone);
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return {
+    x: round(Math.min(box.x1, Math.max(box.x0, point.x))),
+    y: round(Math.min(box.y1, Math.max(box.y0, point.y))),
+  };
+}
+
+/** O card sem o ponto exato se ele deixou de caber na zona (ou se a zona sumiu). */
+function keepSpot(card: SceneCard, zones: Zone[]): SceneCard {
+  if (card.at === null) return card;
+  const zone = zones.find((z) => z.id === card.zoneId);
+  if (!zone) return { ...card, at: null };
+  const box = zoneBox(zone);
+  const inside = card.at.x >= box.x0 && card.at.x <= box.x1 && card.at.y >= box.y0 && card.at.y <= box.y1;
+  return inside ? card : { ...card, at: null };
 }
 
 function cleanCounter(value: unknown, min: unknown, max: unknown): CounterSpec {
@@ -945,7 +1003,8 @@ export function normalizeSceneState(value: unknown): SceneState {
       const kind = CARD_KINDS.includes(card.kind as CardKind) ? card.kind as CardKind : "note";
       const clock = card.clock as { segments?: number; filled?: number } | null | undefined;
       const segments = clampInt(clock?.segments ?? 6, 2, MAX_SEGMENTS);
-      scene.cards.push({
+      const spot = card.at as Partial<SpotPoint> | null | undefined;
+      const stored: SceneCard = {
         id: card.id,
         title: typeof card.title === "string" ? card.title : "Sem título",
         text: typeof card.text === "string" ? card.text : "",
@@ -963,7 +1022,11 @@ export function normalizeSceneState(value: unknown): SceneState {
         checklist: kind === "checklist" ? cleanChecklist(card.checklist) : null,
         clock: kind === "clock" ? { segments, filled: clampInt(clock?.filled ?? 0, 0, segments) } : null,
         zoneId: scene.zones.some((z) => z.id === card.zoneId) ? card.zoneId as string : null,
-      });
+        at: typeof spot?.x === "number" && typeof spot.y === "number" && Number.isFinite(spot.x) && Number.isFinite(spot.y)
+          ? { x: spot.x, y: spot.y }
+          : null,
+      };
+      scene.cards.push(keepSpot(stored, scene.zones));
     }
     scenes.push(scene);
   }

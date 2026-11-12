@@ -1,4 +1,4 @@
-﻿extends Control
+extends Control
 ## A mesa: histórico navegável de tudo que o app anuncia + campo de mensagem.
 ##
 ## Teclas:  ;  abre o campo (a tecla da barra em teclado US)   ,  .  anterior / seguinte
@@ -117,7 +117,7 @@ func _ready() -> void:
 	_audio_engine.setup(_client)
 	add_child(_audio_engine)
 	_voice = VoiceChat.new()
-	_voice.setup(_client, _audio_engine)
+	_voice.setup(_client)
 	add_child(_voice)
 	var audio_panel := AudioPanel.new()
 	audio_panel.setup(_client, _audio_engine, _voice)

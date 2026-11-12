@@ -397,3 +397,38 @@ Deno.test("cena: importar traz zonas, cards e mídia, sem som tocando e só para
   assertEquals(scene.cards[0].audio?.playing, false);
   assertThrows(() => applySceneOp(loaded, { type: "scene:import", id: "nova", scene: saved }, true, known), SceneError);
 });
+
+Deno.test("cena: sons e tokens têm ponto exato dentro da zona", () => {
+  const known = (id: string, kind: string) => id === "wav" && kind === "audio";
+  let state = createSceneState();
+  const run = (op: Parameters<typeof applySceneOp>[1], host = true) => state = applySceneOp(state, op, host, known).state;
+  const cards = () => state.scenes[0].cards;
+  run({ type: "zone:add", id: "mata", name: "Mata", description: "", cells: [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }] });
+  run({ type: "card:add", id: "rio", title: "Rio", text: "", kind: "audio", mediaId: "wav", mode: "ambient" } as never);
+  assertThrows(() => applySceneOp(state, { type: "card:spot", cardId: "rio", at: { x: 1, y: 1 } }, true, known), SceneError);
+  run({ type: "card:place", cardId: "rio", zoneId: "mata" });
+  assertEquals(cards()[0].at, null);
+  assertThrows(() => applySceneOp(state, { type: "card:spot", cardId: "rio", at: { x: 1, y: 1 } }, false, known), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "card:spot", cardId: "rio", at: { x: NaN, y: 1 } }, true, known), SceneError);
+
+  run({ type: "card:spot", cardId: "rio", at: { x: 1.234, y: 9 } });
+  assertEquals(cards()[0].at, { x: 1.23, y: 3 });
+  run({ type: "card:spot", cardId: "rio", at: { x: 2.5, y: 1.5 } });
+  assertEquals(cards()[0].at, { x: 2.5, y: 1.5 });
+
+  // Encolher a zona tira o ponto que ficou de fora; mudar de zona ou soltar também.
+  run({ type: "zone:edit", zoneId: "mata", name: "Mata", description: "", cells: [{ x: 1, y: 1 }] });
+  assertEquals(cards()[0].at, null);
+  run({ type: "card:spot", cardId: "rio", at: { x: 1.5, y: 1.5 } });
+  run({ type: "zone:edit", zoneId: "mata", name: "Mata", description: "", cells: [{ x: 1, y: 1 }, { x: 2, y: 1 }] });
+  assertEquals(cards()[0].at, { x: 1.5, y: 1.5 });
+  run({ type: "card:place", cardId: "rio", zoneId: null });
+  assertEquals(cards()[0].at, null);
+
+  // Voltar ao centro e persistência: o ponto sobrevive ao estado lido de disco.
+  run({ type: "card:place", cardId: "rio", zoneId: "mata" });
+  run({ type: "card:spot", cardId: "rio", at: { x: 2, y: 1.25 } });
+  assertEquals(normalizeSceneState(JSON.parse(JSON.stringify(state))).scenes[0].cards[0].at, { x: 2, y: 1.25 });
+  run({ type: "card:spot", cardId: "rio", at: null });
+  assertEquals(cards()[0].at, null);
+});

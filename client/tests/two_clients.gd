@@ -1,4 +1,4 @@
-﻿extends SceneTree
+extends SceneTree
 ## Dois clientes numa mesa: um só pela camada de rede (Ana) e um dirigindo a interface real (Caio).
 ## Uso: godot --headless --path client --script res://tests/two_clients.gd -- 127.0.0.1:8000
 
@@ -109,29 +109,58 @@ func _voice_tests(table: Control, ana: Node) -> void:
 	_check(panel._row_text(mode_row) == "Voz: desligado", "a voz começa desligada")
 	_check(panel._row_text(panel._rows[kinds.find("voice_noise")]) == "Supressão de ruído: ligada", "supressão de ruído ligada por padrão")
 
-	# Quem fala soa de onde está sentado.
-	ana.send_seat("z1")
-	_check(await _wait(func() -> bool: return table._client.seats.get("Ana", "") == "z1"), "o lugar de Ana chega a Caio")
+	_check(panel._row_text(panel._rows[kinds.find("voice_positional")]).begins_with("Voz posicional, mesa redonda: ligada"), "a voz posicional vem ligada")
+
 	var codec: RefCounted = ClassDB.instantiate("VoiceCodec")
 	var packets: Array = codec.encode(_tone(0.5, 0.4))
-	_check(packets.size() >= 24, "o codec gera pacotes de 20 ms")
+	_check(packets.size() >= 24 and packets.size() <= 25, "o codec gera 50 pacotes por segundo, de 20 ms (%d em meio segundo)" % packets.size())
+	_check((codec.decode("teste", packets[0], 1.0, 1.0) as PackedVector2Array).size() == 960, "cada pacote decodifica em 20 ms de áudio")
 	for packet in packets:
 		ana.send_voice(packet)
 	_check(await _wait(func() -> bool: return voice._peers.has("Ana")), "Caio ouve a voz de Ana")
 	_check(await _wait(func() -> bool: return voice.speakers().has("Ana")), "Ana aparece como falando")
-	var spot: Vector2 = table._audio_engine.spot_of("z1")
-	_check(voice._peers["Ana"]["player"].position.is_equal_approx(spot), "a voz de Ana sai da zona dela")
+	# Na mesa redonda de dois, Ana senta do outro lado: à frente, sem pan e um pouco mais baixa.
+	var across: Vector2 = voice.gains_for("Ana")
+	_check(is_equal_approx(across.x, across.y) and across.x < 1.0 and across.x > 0.5, "com duas pessoas a outra fica à frente, sem pan (%s)" % across)
 	_check(panel._row_text({"kind": "voice_speakers"}) == "Falando agora: Ana", "a lista diz quem fala")
 	_check(await _wait(func() -> bool: return voice.speakers().is_empty(), 3.0), "depois do silêncio ninguém fala")
-	ana.send_seat("")
-	_check(await _wait(func() -> bool: return not table._client.seats.has("Ana")), "levantar tira Ana dos lugares")
+
+	# Geometria da mesa redonda com 4 pessoas: o lugar seguinte fica à esquerda, o anterior à direita, o oposto à frente.
+	var left: Vector2 = voice.table_gains(0, 1, 4)
+	var right: Vector2 = voice.table_gains(0, 3, 4)
+	var front: Vector2 = voice.table_gains(0, 2, 4)
+	_check(left.x > left.y and right.y > right.x and is_equal_approx(front.x, front.y), "o seguinte soa à esquerda, o anterior à direita e o oposto à frente")
+	_check(is_equal_approx(left.x, right.y) and is_equal_approx(left.y, right.x), "a mesa é simétrica")
+	_check(front.x < left.x, "quem está do outro lado da mesa soa mais baixo que o vizinho")
+	var ring: Vector2 = voice.table_gains(1, 3, 8)
+	_check(voice.table_gains(2, 2, 4) == Vector2.ONE and voice.table_gains(0, 1, 1) == Vector2.ONE and ring.x != ring.y, "sozinho ou sem ordem a voz fica no centro")
+	voice.set_positional(false)
+	_check(voice.gains_for("Ana") == Vector2.ONE, "desligada a voz posicional, todas soam no centro")
+	voice.set_positional(true)
+
+	# Colchão contra chegada irregular: pacotes entregues em rajadas não podem picotar a voz.
+	var speech: Array = codec.encode(_tone(3.0, 0.4))
+	await _wait(func() -> bool: return voice.speakers().is_empty(), 3.0)
+	var jitter := RandomNumberGenerator.new()
+	jitter.seed = 5
+	var started := Time.get_ticks_msec()
+	var next := 0
+	while next < speech.size():
+		var due := next * 20.0 + jitter.randf_range(0.0, 40.0)
+		if float(Time.get_ticks_msec() - started) >= due:
+			voice._on_voice("Ana", speech[next])
+			next += 1
+		await process_frame
+	var cuts: int = voice._peers["Ana"]["playback"].get_skips()
+	_check(cuts <= 3, "voz com chegada irregular (até 40 ms) quase não tem cortes: %d" % cuts)
 
 	# Enviar: o microfone aberto só manda quando há voz.
 	var heard: Array = []
 	ana.voice_received.connect(func(peer: String, packet: PackedByteArray) -> void: heard.append([peer, packet]))
 	voice.mode = "open"
 	voice.feed(_tone(0.5, 0.4), 0.5)
-	_check(await _wait(func() -> bool: return heard.size() >= 20 and heard[0][0] == "Caio"), "o microfone aberto envia a voz de Caio para Ana")
+	_check(await _wait(func() -> bool: return heard.size() >= 24 and heard[0][0] == "Caio"), "o microfone aberto envia a voz de Caio para Ana")
+	await create_timer(0.3).timeout
 	voice._hang = 0.0
 	heard.clear()
 	voice.feed(PackedVector2Array(_tone(1.0, 0.0)), 1.0)
@@ -626,6 +655,16 @@ func _run() -> void:
 	ana.scene_op({"type": "audio:play", "cardId": "fogo"})
 	_check(await _wait(func() -> bool: return engine.has_voice("fogo")), "Caio baixa o som e ele começa a tocar")
 	_check(engine.is_positional("fogo"), "o som numa zona é posicional")
+	var box: Rect2 = audio_panel._zone_box("z1")
+	var spot := box.position + Vector2(0.25, 0.75)
+	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": {"x": spot.x, "y": spot.y}})
+	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(spot * engine.CELL)), "o som toca do ponto exato dentro da zona")
+	_check(audio_panel._row_text(audio_panel._rows[first_audio]).contains("em ponto exato"), "a lista diz que o som tem ponto exato")
+	audio_panel._spot_box = box
+	audio_panel._spot_at = spot
+	_check(audio_panel._spot_text().begins_with("Coluna "), "o ponto é falado em coluna e linha: %s" % audio_panel._spot_text())
+	ana.scene_op({"type": "card:spot", "cardId": "fogo", "at": null})
+	_check(await _wait(func() -> bool: return engine._voices["fogo"]["player"].position.is_equal_approx(engine.spot_of("z1"))), "sem ponto exato o som volta ao centro da zona")
 	audio_panel._zone.grab_focus()
 	audio_panel._cursor = 0
 	await _key(KEY_LEFT, KEY_LEFT)

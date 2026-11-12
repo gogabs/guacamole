@@ -1,4 +1,4 @@
-﻿import { compendiumCatalog } from "../core/compendium/mod.ts";
+import { compendiumCatalog } from "../core/compendium/mod.ts";
 import {
   type ChatEntry,
   type ClientMessage,
@@ -44,8 +44,8 @@ export interface RunningServer {
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_VOICE_PACKET = 400;
 const MAX_VOICE_BACKLOG = 64 * 1024;
-const VOICE_RATE = 60;
-const VOICE_BURST = 25;
+const VOICE_RATE = 120;
+const VOICE_BURST = 60;
 
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const rng = options.rng ?? defaultRng;
@@ -97,7 +97,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
   /**
    * Repassa um pacote de voz aos outros da mesa como [tamanho do nome][nome][pacote Opus].
-   * Pacotes grandes demais ou em ritmo acima do de uma fala normal (50 por segundo) são descartados.
+   * Pacotes grandes demais ou em ritmo acima do dobro do de uma fala normal (50 por segundo) são descartados.
    */
   const relayVoice = (room: RoomRecord, socket: WebSocket, player: Player, packet: Uint8Array) => {
     if (packet.length === 0 || packet.length > MAX_VOICE_PACKET) return;

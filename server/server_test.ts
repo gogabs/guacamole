@@ -407,3 +407,28 @@ Deno.test("mesa: exportar e importar leva cenas, fichas e compêndios para uma m
     await server.shutdown();
   }
 });
+
+Deno.test("voz: o ritmo normal de fala passa inteiro pelo relay, sem perder pacotes", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const ana = await TestClient.connect(wsUrl(server.port, created.room.id, "Ana", created.hostToken));
+    await ana.next("welcome");
+    const bia = await TestClient.connect(wsUrl(server.port, created.room.id, "Bia"));
+    await bia.next("welcome");
+    // 3 segundos de fala a 50 pacotes por segundo, como o cliente envia.
+    const total = 150;
+    for (let i = 0; i < total; i++) {
+      bia.sendBytes(new Uint8Array([i & 255, 1, 2, 3]));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const deadline = Date.now() + 3000;
+    while (ana.frames.length < total && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assertEquals(ana.frames.length, total);
+    await bia.close();
+    await ana.close();
+  } finally {
+    await server.shutdown();
+  }
+});

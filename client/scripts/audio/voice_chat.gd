@@ -1,7 +1,12 @@
 extends Node
 ## Chat de voz posicional. O Godot captura e toca; a extensão em Rust (VoiceCodec) tira o ruído
-## com RNNoise e comprime em Opus. O servidor só repassa os pacotes, e cada voz toca da zona onde
-## quem fala está sentado: o mesmo "Minha posição" do áudio da cena, agora compartilhado.
+## com RNNoise e comprime em Opus. O servidor só repassa os pacotes.
+##
+## A posição das vozes simula uma mesa redonda: todos sentam em volta dela na ordem de entrada na
+## mesa (a mesma lista para todos), e cada um ouve os outros da direção e da distância em que eles
+## estariam, de frente para o centro. Quem senta ao lado soa de lado; quem fica do outro lado da
+## mesa soa à frente, um pouco mais baixo. O pan é aplicado aos próprios pacotes (ganho esquerdo e
+## direito), então não depende de janela nem de câmera.
 ##
 ## Enviar: segure F4 (push-to-talk) ou deixe o microfone aberto, que só manda quando há voz.
 ## Escutar sempre funciona, mesmo com o próprio microfone desligado.
@@ -12,7 +17,15 @@ const PTT_KEY := KEY_F4
 const BUS := "VozCaptura"
 const RATE := 48000
 const BUFFER := 0.5  # segundos do gerador de áudio de cada voz
-const MAX_QUEUE := 0.3  # segundos de voz esperando para tocar; acima disso descarta
+const FRAME_SAMPLES := 960  # 20 ms a 48 kHz
+const MAX_QUEUE := 0.45  # segundos de voz esperando para tocar; acima disso descarta
+## Colchão contra a chegada irregular dos pacotes, em segundos: começa no mínimo e cresce a cada
+## esvaziamento no meio da fala, até o máximo; encolhe de volta depois de um silêncio.
+const CUSHION_MIN := 0.06
+const CUSHION_MAX := 0.24
+const CUSHION_STEP := 0.04
+const MID_SPEECH_MS := 150
+const SILENCE_MS := 1500
 const OPEN_GATE := 0.008  # volume mínimo para o microfone aberto enviar
 const OPEN_HANG := 0.35  # segundos que o microfone aberto continua enviando depois da voz
 const SPEAKING_FOR := 0.4
@@ -24,11 +37,12 @@ const MODE_ORDER := ["off", "ptt", "open"]
 var mode := "off"
 var suppress := true
 var announce := false
+## Voz posicional (mesa redonda). Desligada, todas as vozes soam no centro.
+var positional := true
 var volume := 1.0
 var transmitting := false
 
 var _client: Node
-var _engine: Node
 var _codec: RefCounted
 var _capture: AudioEffectCapture
 var _mic: AudioStreamPlayer
@@ -38,9 +52,8 @@ var _hang := 0.0
 var _talking := false
 
 
-func setup(client: Node, engine: Node) -> void:
+func setup(client: Node) -> void:
 	_client = client
-	_engine = engine
 
 
 func _ready() -> void:
@@ -51,10 +64,6 @@ func _ready() -> void:
 		_codec.set_suppression(suppress)
 	_client.voice_received.connect(_on_voice)
 	_client.presence_changed.connect(_on_presence)
-	_engine.listener_moved.connect(func(zone_id: String) -> void: _client.send_seat(zone_id))
-	_client.welcomed.connect(func(_you: Dictionary, _room: Dictionary, _players: Array, _history: Array) -> void:
-		if not _engine.listener_zone.is_empty():
-			_client.send_seat(_engine.listener_zone))
 
 
 func _exit_tree() -> void:
@@ -74,6 +83,7 @@ func _load_settings() -> void:
 		return
 	suppress = bool(file.get_value("voz", "supressao", true))
 	announce = bool(file.get_value("voz", "avisar", false))
+	positional = bool(file.get_value("voz", "posicional", true))
 	volume = clampf(float(file.get_value("voz", "volume", 1.0)), 0.0, 1.0)
 	var input := str(file.get_value("voz", "entrada", ""))
 	if not input.is_empty() and input in AudioServer.get_input_device_list():
@@ -87,6 +97,7 @@ func _save_settings() -> void:
 	var file := ConfigFile.new()
 	file.set_value("voz", "supressao", suppress)
 	file.set_value("voz", "avisar", announce)
+	file.set_value("voz", "posicional", positional)
 	file.set_value("voz", "volume", volume)
 	file.set_value("voz", "entrada", AudioServer.input_device)
 	file.set_value("voz", "saida", AudioServer.output_device)
@@ -118,6 +129,11 @@ func set_suppression(on: bool) -> void:
 
 func set_announce(on: bool) -> void:
 	announce = on
+	_save_settings()
+
+
+func set_positional(on: bool) -> void:
+	positional = on
 	_save_settings()
 
 
@@ -222,15 +238,29 @@ func feed(frames: PackedVector2Array, delta: float = 0.0) -> void:
 func _on_voice(peer: String, packet: PackedByteArray) -> void:
 	if _codec == null or peer == str(_client.you.get("name", "")):
 		return
-	var pcm: PackedVector2Array = _codec.decode(peer, packet)
+	var gains := gains_for(peer)
+	var pcm: PackedVector2Array = _codec.decode(peer, packet, gains.x, gains.y)
 	if pcm.is_empty():
 		return
 	var voice := _voice_of(peer)
-	voice["heard"] = Time.get_ticks_msec()
+	var now := Time.get_ticks_msec()
 	var playback: AudioStreamGeneratorPlayback = voice["playback"]
 	var queued := int(BUFFER * RATE) - playback.get_frames_available()
 	if float(queued) / RATE > MAX_QUEUE:
 		return
+	# Os pacotes chegam em rajadas (a rede e o ritmo dos quadros do jogo), mas o som sai num ritmo
+	# fixo. Sem folga, cada atraso vira um corte. Quando a fila esvazia, antes do próximo pacote vai
+	# um pouco de silêncio que serve de colchão; se esvaziar no meio de uma fala, o colchão cresce.
+	if queued < FRAME_SAMPLES:
+		var mid_speech := now - int(voice["heard"]) < MID_SPEECH_MS and int(voice["heard"]) > 0
+		if mid_speech:
+			voice["cushion"] = minf(float(voice["cushion"]) + CUSHION_STEP, CUSHION_MAX)
+		elif now - int(voice["heard"]) > SILENCE_MS:
+			voice["cushion"] = maxf(float(voice["cushion"]) - CUSHION_STEP, CUSHION_MIN)
+		var padding := PackedVector2Array()
+		padding.resize(int(float(voice["cushion"]) * RATE))
+		playback.push_buffer(padding)
+	voice["heard"] = now
 	playback.push_buffer(pcm)
 
 
@@ -240,20 +270,43 @@ func _voice_of(peer: String) -> Dictionary:
 	var stream := AudioStreamGenerator.new()
 	stream.mix_rate = RATE
 	stream.buffer_length = BUFFER
-	var player := AudioStreamPlayer2D.new()
+	var player := AudioStreamPlayer.new()
 	player.stream = stream
-	player.max_distance = 2600.0
 	player.volume_db = _db()
-	player.position = _spot(peer)
 	add_child(player)
 	player.play()
-	var voice := {"player": player, "playback": player.get_stream_playback(), "heard": 0}
+	var voice := {"player": player, "playback": player.get_stream_playback(), "heard": 0, "cushion": CUSHION_MIN}
 	_peers[peer] = voice
 	return voice
 
 
-func _spot(peer: String) -> Vector2:
-	return _engine.spot_of(str(_client.seats.get(peer, "")))
+## Ganho (esquerdo, direito) com que peer é ouvido, pela posição dele na mesa redonda.
+func gains_for(peer: String) -> Vector2:
+	if not positional:
+		return Vector2.ONE
+	var names: Array = []
+	for player in _client.players:
+		names.append(str(player["name"]))
+	var me := names.find(str(_client.you.get("name", "")))
+	var other := names.find(peer)
+	if me < 0 or other < 0:
+		return Vector2.ONE
+	return table_gains(me, other, names.size())
+
+
+## Mesa redonda: count pessoas em volta, me e other são os lugares (0 a count-1). Quem ouve
+## está na base do círculo, de frente para o centro; o lugar seguinte na lista fica à esquerda, o
+## anterior à direita. Devolve o ganho (esquerdo, direito): o pan pelo lado em que a pessoa está e
+## uma queda suave com a distância (quem está do outro lado da mesa chega a 65%).
+static func table_gains(me: int, other: int, count: int) -> Vector2:
+	if count < 2 or me == other:
+		return Vector2.ONE
+	var phi := TAU * float(other - me) / float(count)
+	var offset := Vector2(-sin(phi), cos(phi) - 1.0)  # em raios da mesa; para a frente é -y
+	var pan := clampf(offset.x / maxf(offset.length(), 0.0001), -1.0, 1.0)
+	var angle := (pan + 1.0) * PI / 4.0
+	var closeness := 1.0 - 0.35 * clampf(offset.length() / 2.0, 0.0, 1.0)
+	return Vector2(minf(1.0, sqrt(2.0) * cos(angle)), minf(1.0, sqrt(2.0) * sin(angle))) * closeness
 
 
 func _on_presence(players: Array) -> void:
@@ -274,7 +327,6 @@ func _update_speaking() -> void:
 	var changed := false
 	for name in _peers:
 		var voice: Dictionary = _peers[name]
-		(voice["player"] as Node2D).position = _spot(name)
 		var talking: bool = now - int(voice["heard"]) < int(SPEAKING_FOR * 1000.0) and int(voice["heard"]) > 0
 		if talking != _speaking.has(name):
 			changed = true

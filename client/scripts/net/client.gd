@@ -1,4 +1,4 @@
-﻿extends Node
+extends Node
 ## Cliente do servidor Guacamole: HTTP para criar/entrar em mesas e WebSocket para o jogo.
 ## Não conhece interface nem som; só emite sinais com os dicionários do protocolo.
 
@@ -13,7 +13,6 @@ signal compendiums_changed(ids: Array)
 signal compendium_item_received(compendium_id: String, item: Dictionary)
 signal media_ready(media_id: String)
 signal audio_fired(card_id: String)
-signal seats_changed(seats: Dictionary)
 signal voice_received(peer: String, packet: PackedByteArray)
 signal server_error(message: String)
 signal disconnected(reason: String)
@@ -31,8 +30,6 @@ var characters: Dictionary = {}
 ## Compêndios que o servidor oferece (sem conteúdo) e os ids dos que a mesa adicionou.
 var catalog: Array = []
 var compendiums: Array = []
-## Zona em que cada participante está sentado: nome do jogador -> id da zona.
-var seats: Dictionary = {}
 
 var _items: Dictionary = {}  # "compêndio/item" -> conteúdo já recebido
 var _token := ""
@@ -369,13 +366,7 @@ func leave() -> void:
 	characters = {}
 	catalog = []
 	compendiums = []
-	seats = {}
 	_items = {}
-
-
-## Senta numa zona da cena ("" levanta); a voz de cada um soa de onde está sentado.
-func send_seat(zone_id: String) -> void:
-	_send({"type": "voice:seat", "zoneId": zone_id})
 
 
 ## Manda um pacote de voz (Opus) para o resto da mesa.
@@ -454,9 +445,6 @@ func _handle(raw: String) -> void:
 			scene_changed.emit(scene)
 		"audio:fire":
 			audio_fired.emit(str(message["cardId"]))
-		"voice:seats":
-			seats = message["seats"]
-			seats_changed.emit(seats)
 		"compendium:sync":
 			compendiums = message["compendiums"]
 			compendiums_changed.emit(compendiums)

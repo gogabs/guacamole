@@ -4,8 +4,6 @@ extends Node
 ## centro da sua zona ("Minha posição") ou no centro do grid. Tudo o mais é o estado do servidor:
 ## o card diz se toca e desde quando (no relógio do servidor), e quem entra depois cai no ponto certo.
 
-signal listener_moved(zone_id: String)
-
 const CELL := 100.0
 
 ## Volume geral só de quem ouve, de 0 a 1.
@@ -52,7 +50,6 @@ func set_master(value: float) -> void:
 func set_listener_zone(zone_id: String) -> void:
 	listener_zone = zone_id
 	sync()
-	listener_moved.emit(zone_id)
 
 
 ## Onde fica uma zona da cena ativa (ou o centro do grid, se não existir): usado pela voz.
@@ -88,6 +85,14 @@ func _zone_position(scene: Dictionary, zone_id: Variant) -> Variant:
 	return null
 
 
+## Onde o card soa: o ponto exato que o anfitrião deu dentro da zona, senão o centro dela.
+func _card_spot(scene: Dictionary, card: Dictionary) -> Variant:
+	var at: Variant = card.get("at")
+	if at is Dictionary and card.get("zoneId") != null:
+		return Vector2(float(at["x"]), float(at["y"])) * CELL
+	return _zone_position(scene, card.get("zoneId"))
+
+
 func _grid_center(scene: Dictionary) -> Vector2:
 	var grid: Dictionary = scene.get("grid", {"cols": 8, "rows": 6})
 	return Vector2(float(grid["cols"]), float(grid["rows"])) * CELL / 2.0
@@ -119,7 +124,7 @@ func sync() -> void:
 func _ensure(scene: Dictionary, card: Dictionary) -> void:
 	var audio: Dictionary = card["audio"]
 	var id := str(card["id"])
-	var position: Variant = _zone_position(scene, card.get("zoneId"))
+	var position: Variant = _card_spot(scene, card)
 	var positional: bool = position != null
 	var voice: Variant = _voices.get(id)
 	if voice != null and (voice["started"] != audio["startedAt"] or voice["positional"] != positional):
@@ -200,7 +205,7 @@ func _fire(card_id: String) -> void:
 	if stream == null:
 		return
 	var scene := _active()
-	var position: Variant = _zone_position(scene, card.get("zoneId"))
+	var position: Variant = _card_spot(scene, card)
 	var player: Node
 	if position != null:
 		var spatial := AudioStreamPlayer2D.new()

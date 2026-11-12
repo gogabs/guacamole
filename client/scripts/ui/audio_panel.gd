@@ -1,4 +1,4 @@
-﻿extends VBoxContainer
+extends VBoxContainer
 ## Região "Áudio": ambiência, música e o soundboard da cena ativa. Todos veem a lista e ajustam
 ## o próprio volume e a própria posição; só o anfitrião toca, para, dispara e adiciona sons.
 ##
@@ -20,7 +20,7 @@ const HELP := (
 	"Áudio. Setas navegam, esquerda e direita mudam o volume. Voz: Enter nas linhas de voz muda o modo, "
 	+ "a supressão e os dispositivos; no push-to-talk, segure F4 para falar. Anfitrião: Enter toca ou para, "
 	+ "1 a 9 disparam efeitos, Shift mais número dá a tecla ao som, L liga o loop, M troca o modo, "
-	+ "P põe o som numa zona, E renomeia, Delete remove, V oculta ou revela."
+	+ "P põe o som numa zona, G posiciona o som num ponto exato da zona, E renomeia, Delete remove, V oculta ou revela."
 )
 
 var _client: Node
@@ -42,6 +42,11 @@ var _choice_title := ""
 var _choice_options: Array = []
 var _choice_index := 0
 var _choice_done: Callable
+
+var _spot_card := ""
+var _spot_start: Variant = null
+var _spot_at := Vector2.ZERO
+var _spot_box := Rect2()
 
 
 func focus_zone() -> Control:
@@ -125,7 +130,7 @@ func _rebuild() -> void:
 	_rows.append({"kind": "master"})
 	_rows.append({"kind": "position"})
 	if _voice.available():
-		for kind in ["voice_mode", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
+		for kind in ["voice_mode", "voice_positional", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
 			_rows.append({"kind": kind})
 	else:
 		_rows.append({"kind": "header", "text": "Voz indisponível: a extensão de voz não foi carregada."})
@@ -162,10 +167,12 @@ func _row_text(row: Dictionary) -> String:
 			return "Volume geral, só para você: %d" % roundi(_engine.master * 100.0)
 		"position":
 			var label := _zone_name(_engine.listener_zone)
-			return "Minha posição: %s" % ("zona %s" % label if not label.is_empty() else "centro da cena")
+			return "Onde ouço os sons da cena: %s" % ("zona %s" % label if not label.is_empty() else "centro da cena")
 		"voice_mode":
 			var hint: String = ", segure F4 para falar" if _voice.mode == "ptt" else ""
 			return "Voz: %s%s" % [_voice.MODE_NAMES[_voice.mode], hint]
+		"voice_positional":
+			return "Voz posicional, mesa redonda: %s" % ("ligada" if _voice.positional else "desligada, todas no centro")
 		"voice_noise":
 			return "Supressão de ruído: %s" % ("ligada" if _voice.suppress else "desligada")
 		"voice_in":
@@ -198,6 +205,8 @@ func _row_text(row: Dictionary) -> String:
 	var zone := _zone_name(card.get("zoneId"))
 	if not zone.is_empty():
 		parts.append("na zona %s" % zone)
+		if card.get("at") is Dictionary:
+			parts.append("em ponto exato")
 	var line := ", ".join(parts)
 	return "Oculto, %s" % line if card.get("hidden", false) else line
 
@@ -206,7 +215,7 @@ func _is_button(row: Dictionary) -> bool:
 	match row["kind"]:
 		"header", "voice_speakers":
 			return false
-		"master", "position", "voice_mode", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce":
+		"master", "position", "voice_mode", "voice_positional", "voice_noise", "voice_in", "voice_out", "voice_volume", "voice_announce":
 			return true
 		_:
 			return _is_host()
@@ -222,6 +231,9 @@ func _focus_text() -> String:
 func _render() -> void:
 	_view.clear()
 	_view.append_text("[color=#%s][b]Áudio da cena[/b][/color]\n" % ThemeFactory.ACCENT.to_html(false))
+	if _mode == "spot":
+		_view.append_text("Posicionando o som. Setas movem, Enter guarda, Escape cancela.\n%s\n" % _spot_text())
+		return
 	if _mode == "choice":
 		_view.append_text("%s\n" % _choice_title.replace("[", "[lb]"))
 		for i in _choice_options.size():
@@ -251,7 +263,14 @@ func _on_zone_focus() -> void:
 func _on_key(key: InputEventKey) -> void:
 	if key.alt_pressed or key.meta_pressed or key.ctrl_pressed:
 		return
-	var handled := _choice_key(key) if _mode == "choice" else _browse_key(key)
+	var handled: bool
+	match _mode:
+		"choice":
+			handled = _choice_key(key)
+		"spot":
+			handled = _spot_key(key)
+		_:
+			handled = _browse_key(key)
 	if handled:
 		_zone.accept_event()
 
@@ -316,6 +335,9 @@ func _browse_key(key: InputEventKey) -> bool:
 		KEY_P:
 			if not key.echo and kind == "audio" and _need_host():
 				_place(row)
+		KEY_G:
+			if not key.echo and kind == "audio" and _need_host():
+				_begin_spot(row)
 		KEY_E:
 			if not key.echo and kind == "audio" and _need_host():
 				var card: Dictionary = _active()["cards"][row["index"]]
@@ -406,6 +428,10 @@ func _activate(row: Dictionary) -> void:
 			_voice.cycle_mode()
 			_rebuild()
 			Speech.say(_row_text(row), true)
+		"voice_positional":
+			_voice.set_positional(not _voice.positional)
+			_rebuild()
+			Speech.say(_row_text(row), true)
 		"voice_noise":
 			_voice.set_suppression(not _voice.suppress)
 			_rebuild()
@@ -433,6 +459,113 @@ func _activate(row: Dictionary) -> void:
 			var audio: Dictionary = card["audio"]
 			_follow = str(card["id"])
 			_op({"type": "audio:stop" if audio["playing"] else "audio:play", "cardId": card["id"]})
+
+
+# --- Ponto exato dentro da zona -----------------------------------------------------------------
+
+## Entra no modo de posicionar o som: as setas o movem dentro da zona e ele soa dali na hora.
+func _begin_spot(row: Dictionary) -> void:
+	var card: Dictionary = _active()["cards"][row["index"]]
+	if card.get("zoneId") == null:
+		Sfx.play("error")
+		Speech.say("Ponha o som numa zona antes, com P.", true)
+		return
+	_spot_box = _zone_box(card["zoneId"])
+	_spot_start = card.get("at")
+	_spot_card = str(card["id"])
+	_spot_at = Vector2(float(_spot_start["x"]), float(_spot_start["y"])) if _spot_start is Dictionary else _spot_box.get_center()
+	_mode = "spot"
+	_render()
+	Sfx.play("open_input")
+	Speech.say("Posicionando %s na zona %s. Setas movem um quarto de quadrado, Shift um quadrado inteiro, Home volta ao centro, Enter confirma, Escape cancela. %s" % [
+		card["title"], _zone_name(card["zoneId"]), _spot_text()], true)
+
+
+## O retângulo que cerca as células da zona, em células do grid.
+func _zone_box(zone_id: Variant) -> Rect2:
+	var low := Vector2(INF, INF)
+	var high := Vector2(-INF, -INF)
+	for zone in _active()["zones"]:
+		if zone["id"] == zone_id:
+			for c in zone["cells"]:
+				low = Vector2(minf(low.x, float(c["x"])), minf(low.y, float(c["y"])))
+				high = Vector2(maxf(high.x, float(c["x"]) + 1.0), maxf(high.y, float(c["y"]) + 1.0))
+	return Rect2(low, high - low)
+
+
+## "coluna 3, linha 2" com frações, mais o lado em que o som está em relação a quem ouve.
+func _spot_text() -> String:
+	var column := _number(_spot_at.x + 0.5)
+	var line := _number(_spot_at.y + 0.5)
+	var listener: Vector2 = _engine.spot_of(_engine.listener_zone) / _engine.CELL
+	var side := "na sua frente"
+	if _spot_at.x < listener.x - 0.2:
+		side = "à sua esquerda"
+	elif _spot_at.x > listener.x + 0.2:
+		side = "à sua direita"
+	var depth := "na sua altura"
+	if _spot_at.y < listener.y - 0.2:
+		depth = "mais acima"
+	elif _spot_at.y > listener.y + 0.2:
+		depth = "mais abaixo"
+	return "Coluna %s, linha %s, %s, %s." % [column, line, side, depth]
+
+
+func _number(value: float) -> String:
+	return str(snappedf(value, 0.01)).replace(".", ",")
+
+
+func _spot_key(key: InputEventKey) -> bool:
+	var step := 1.0 if key.shift_pressed else 0.25
+	match key.keycode:
+		KEY_LEFT:
+			_spot_move(Vector2(-step, 0))
+		KEY_RIGHT:
+			_spot_move(Vector2(step, 0))
+		KEY_UP:
+			_spot_move(Vector2(0, -step))
+		KEY_DOWN:
+			_spot_move(Vector2(0, step))
+		KEY_HOME:
+			if not key.echo:
+				_spot_at = _spot_box.get_center()
+				_client.scene_op({"type": "card:spot", "cardId": _spot_card, "at": null})
+				Sfx.play("tick")
+				Speech.say("No centro da zona. %s" % _spot_text(), true)
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			if not key.echo:
+				_mode = "browse"
+				_follow = _spot_card
+				_rebuild()
+				Sfx.play("activate")
+				Speech.say("Posição guardada. %s" % _spot_text(), true)
+		KEY_ESCAPE:
+			_mode = "browse"
+			var back: Variant = null
+			if _spot_start is Dictionary:
+				back = {"x": _spot_start["x"], "y": _spot_start["y"]}
+			_client.scene_op({"type": "card:spot", "cardId": _spot_card, "at": back})
+			_follow = _spot_card
+			_rebuild()
+			Sfx.play("close_input")
+			Speech.say("Cancelado, o som voltou de onde estava.", true)
+		_:
+			return key.keycode == KEY_TAB
+	return true
+
+
+func _spot_move(delta: Vector2) -> void:
+	var target := Vector2(
+		clampf(snappedf(_spot_at.x + delta.x, 0.25), _spot_box.position.x, _spot_box.end.x),
+		clampf(snappedf(_spot_at.y + delta.y, 0.25), _spot_box.position.y, _spot_box.end.y))
+	if target.is_equal_approx(_spot_at):
+		Sfx.play("edge")
+		Speech.say("Limite da zona. %s" % _spot_text(), true)
+		return
+	_spot_at = target
+	_client.scene_op({"type": "card:spot", "cardId": _spot_card, "at": {"x": target.x, "y": target.y}})
+	Sfx.play("tick", 0.8 + 0.4 * (target.x - _spot_box.position.x) / maxf(0.01, _spot_box.size.x))
+	Speech.say(_spot_text(), true)
 
 
 func _choose_device(title: String, devices: PackedStringArray, current: String, apply: Callable, row: Dictionary) -> void:
