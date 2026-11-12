@@ -23,6 +23,7 @@ import {
   uniqueName,
   WELCOME_HISTORY,
 } from "./room.ts";
+import { describeUpload, diskMediaStore, MAX_AUDIO_BYTES, MediaError, memoryMediaStore } from "./media.ts";
 import { loadRooms, saveRooms } from "./store.ts";
 
 export interface ServerOptions {
@@ -30,6 +31,8 @@ export interface ServerOptions {
   hostname?: string;
   /** Arquivo JSON das mesas. `null` mantém tudo só em memória (testes). */
   dataFile?: string | null;
+  /** Pasta dos arquivos de mídia. `null` os mantém em memória (testes). */
+  mediaDir?: string | null;
   rng?: Rng;
 }
 
@@ -43,6 +46,7 @@ const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const rng = options.rng ?? defaultRng;
   const dataFile = options.dataFile ?? null;
+  const mediaStore = options.mediaDir ? diskMediaStore(options.mediaDir) : memoryMediaStore();
   const rooms = new Map<string, RoomRecord>();
   const connections = new Map<string, Map<WebSocket, Player>>();
 
@@ -126,6 +130,37 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     scheduleSave();
     broadcast(room.id, { type: "room:sync", room: summaryOf(room) });
     return json(summaryOf(room));
+  }
+
+  /** Quem está na mesa (ou o anfitrião) envia um arquivo; o id é o hash do conteúdo. */
+  async function uploadMedia(room: RoomRecord, request: Request, url: URL): Promise<Response> {
+    const name = normalizedPlayerName(url.searchParams.get("name"));
+    if (!canEnter(room, name, url.searchParams.get("token"))) return json({ message: "Entrada não autorizada." }, 403);
+    // Recusa antes de ler o corpo inteiro quando o aviso de tamanho já passa do maior limite.
+    const announced = Number(request.headers.get("content-length") ?? "0");
+    if (announced > MAX_AUDIO_BYTES) return json({ message: "Arquivo grande demais." }, 413);
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    try {
+      const info = await describeUpload(room.media, bytes, url.searchParams.get("filename") ?? "");
+      if (!room.media.some((m) => m.id === info.id)) {
+        await mediaStore.put(room.id, info.id, bytes);
+        room.media.push(info);
+        scheduleSave();
+      }
+      return json(info, 201);
+    } catch (error) {
+      if (error instanceof MediaError) return json({ message: error.message }, 422);
+      throw error;
+    }
+  }
+
+  async function downloadMedia(room: RoomRecord, mediaId: string): Promise<Response> {
+    const info = room.media.find((m) => m.id === mediaId);
+    const bytes = info ? await mediaStore.get(room.id, mediaId) : null;
+    if (!info || !bytes) return json({ message: "Arquivo não encontrado." }, 404);
+    return new Response(bytes as BufferSource, {
+      headers: cors({ "content-type": info.mime, "cache-control": "public, max-age=31536000, immutable" }),
+    });
   }
 
   function upgrade(request: Request, url: URL): Response {
@@ -225,6 +260,15 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         return createRoom(await readBody(request));
       }
 
+      const mediaMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/media(?:\/([0-9a-f]{64}))?$/);
+      if (mediaMatch) {
+        const room = roomFor(decodeURIComponent(mediaMatch[1]));
+        if (!room) return json({ message: "Mesa não encontrada." }, 404);
+        if (request.method === "POST" && !mediaMatch[2]) return uploadMedia(room, request, url);
+        if (request.method === "GET" && mediaMatch[2]) return downloadMedia(room, mediaMatch[2]);
+        return json({ message: "Não encontrado." }, 404);
+      }
+
       const match = url.pathname.match(/^\/api\/rooms\/([^/]+)$/);
       if (match) {
         const room = roomFor(decodeURIComponent(match[1]));
@@ -286,6 +330,7 @@ if (import.meta.main) {
     port,
     hostname: Deno.env.get("HOST") ?? "0.0.0.0",
     dataFile: new URL("../data/rooms.v2.json", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+    mediaDir: new URL("../data/media", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
   });
   console.log(`Guacamole server em http://localhost:${server.port}`);
 }

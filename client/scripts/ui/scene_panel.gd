@@ -1,22 +1,34 @@
-extends VBoxContainer
+﻿extends VBoxContainer
 ## Região "Cena": os cards da cena ativa e, para o anfitrião, a lista de cenas. Tudo por teclado.
 ##
 ## Cards:  Setas navegam, Enter edita ou adiciona, Shift+Cima/Baixo movem, Delete remove,
+##         P põe o card numa zona, Esquerda/Direita giram um relógio,
 ##         S abre a lista de cenas (anfitrião), H lê a ajuda.
+## Zonas:  áreas nomeadas do grid; Enter (anfitrião) edita nome, descrição e células.
 ## Cenas:  Enter ativa a cena, cria uma nova ou alterna quem edita; E renomeia; Delete exclui;
 ##         Escape volta aos cards.
 ##
 ## É um componente próprio, então quem fala é o app (Prism). O campo de edição que aparece
 ## sob a região é nativo: o AccessKit o anuncia e o app não repete.
+## Acima da lista, SceneCanvas desenha a imagem, as zonas e os tokens para quem enxerga.
 
 const ThemeFactory := preload("res://scripts/ui/theme_factory.gd")
 const EditField := preload("res://scripts/ui/edit_field.gd")
 const EditArea := preload("res://scripts/ui/edit_area.gd")
 const FocusZone := preload("res://scripts/ui/focus_zone.gd")
+const SceneCanvas := preload("res://scripts/ui/scene_canvas.gd")
+const SheetLibrary := preload("res://scripts/ui/sheet_library.gd")
+
+const SEGMENT_CHOICES := [4, 6, 8, 10, 12]
 
 const HELP_CARDS := (
 	"Cena. Setas navegam, Enter edita o card ou adiciona um novo, Shift mais cima ou baixo movem o card, "
-	+ "Delete remove. Só o anfitrião: V oculta ou revela o card, S abre a lista de cenas."
+	+ "Delete remove, P põe o card numa zona ou o solta, Esquerda e direita giram um relógio. "
+	+ "Só o anfitrião: V oculta ou revela o card, Enter numa zona a edita, S abre a lista de cenas."
+)
+const HELP_GRID := (
+	"Células da zona. Setas movem pelo grid, Espaço marca ou desmarca a célula, "
+	+ "Enter confirma, Escape cancela."
 )
 const HELP_SCENES := (
 	"Cenas. Setas navegam, Enter ativa a cena, cria uma nova ou muda quem edita os cards. "
@@ -29,7 +41,18 @@ var _view: RichTextLabel
 var _edit: LineEdit
 var _area: TextEdit
 
-var _mode := "browse"  # browse | choice | edit
+var _canvas: Control
+## Id do card que o cursor deve seguir depois da próxima mudança (ao mover ou pôr numa zona).
+var _follow := ""
+var _seen_active := ""
+
+var _draft: Dictionary = {}  # "x,y" -> true: células marcadas no editor de zona
+var _grid_x := 0
+var _grid_y := 0
+var _grid_zone_id := ""
+var _grid_done: Callable
+
+var _mode := "browse"  # browse | choice | edit | grid
 var _scenes_view := false
 var _rows: Array[Dictionary] = []
 var _cursor := 0
@@ -53,6 +76,10 @@ func setup(client: Node) -> void:
 
 func _ready() -> void:
 	add_theme_constant_override("separation", 8)
+
+	_canvas = SceneCanvas.new()
+	_canvas.setup(_client)
+	add_child(_canvas)
 
 	_zone = FocusZone.new()
 	_zone.setup("Cena", "Setas navegam, Enter age, H lê a ajuda.")
@@ -83,6 +110,7 @@ func _ready() -> void:
 
 	_client.scene_changed.connect(_on_scene_changed)
 	_client.server_error.connect(func(_message: String) -> void: _announce_next = false)
+	_seen_active = str(_client.scene.get("activeId", ""))
 	_rebuild()
 
 
@@ -100,7 +128,14 @@ func _active() -> Dictionary:
 	for scene in _client.scene.get("scenes", []):
 		if scene["id"] == _client.scene.get("activeId"):
 			return scene
-	return {"id": "", "name": "", "cards": []}
+	return {"id": "", "name": "", "description": "", "background": null, "grid": {"cols": 8, "rows": 6}, "zones": [], "cards": []}
+
+
+func _zone_by_id(zone_id: Variant) -> Dictionary:
+	for zone in _active()["zones"]:
+		if zone["id"] == zone_id:
+			return zone
+	return {}
 
 
 func _op(op: Dictionary) -> void:
@@ -128,12 +163,36 @@ func _rebuild() -> void:
 		_rows.append({"kind": "new_scene"})
 		_rows.append({"kind": "editors"})
 	else:
-		var cards: Array = _active()["cards"]
+		var scene := _active()
+		var cards: Array = scene["cards"]
+		_rows.append({"kind": "info"})
+		if _is_host():
+			_rows.append({"kind": "background"})
+			_rows.append({"kind": "grid"})
+		var loose := 0
+		for card in cards:
+			if card.get("zoneId") == null:
+				loose += 1
+		_rows.append({"kind": "header", "text": "Cards soltos, %s" % _plural(loose, "item", "itens")})
 		for i in cards.size():
-			_rows.append({"kind": "card", "index": i})
+			if cards[i].get("zoneId") == null:
+				_rows.append({"kind": "card", "index": i})
 		if _can_edit():
 			_rows.append({"kind": "new_card"})
+		for zone in scene["zones"]:
+			_rows.append({"kind": "zone", "zone": zone})
+			for i in cards.size():
+				if cards[i].get("zoneId") == zone["id"]:
+					_rows.append({"kind": "card", "index": i})
+		if _is_host():
+			_rows.append({"kind": "new_zone"})
 	_cursor = clampi(_cursor, 0, maxi(0, _rows.size() - 1))
+	if not _follow.is_empty():
+		for i in _rows.size():
+			if _rows[i]["kind"] == "card" and _active()["cards"][_rows[i]["index"]]["id"] == _follow:
+				_cursor = i
+		_follow = ""
+	_canvas.show_scene(_active())
 	_render()
 
 
@@ -143,9 +202,40 @@ func _row_text(row: Dictionary) -> String:
 			var card: Dictionary = _active()["cards"][row["index"]]
 			var text := _flat(str(card["text"]))
 			var line := str(card["title"]) if text.is_empty() else "%s: %s" % [card["title"], text]
+			match str(card.get("kind", "note")):
+				"image":
+					line = "Imagem, %s" % line
+				"clock":
+					var clock: Dictionary = card["clock"]
+					line = "Relógio, %s, %d de %d" % [card["title"], int(clock["filled"]), int(clock["segments"])]
+					if not text.is_empty():
+						line += ". " + text
 			return "Oculto, %s" % line if card.get("hidden", false) else line
 		"new_card":
 			return "Adicionar card"
+		"header":
+			return str(row["text"])
+		"info":
+			var description := _flat(str(_active().get("description", "")))
+			return "Descrição: %s" % description if not description.is_empty() else "Sem descrição da cena"
+		"background":
+			return "Fundo da cena: %s" % ("imagem definida" if _active().get("background") != null else "nenhum")
+		"grid":
+			var grid: Dictionary = _active()["grid"]
+			return "Grid das zonas: %d colunas por %d linhas" % [int(grid["cols"]), int(grid["rows"])]
+		"zone":
+			var zone: Dictionary = row["zone"]
+			var count := 0
+			for card in _active()["cards"]:
+				if card.get("zoneId") == zone["id"]:
+					count += 1
+			var summary := "Zona %s, %s, %s" % [
+				zone["name"], _plural((zone["cells"] as Array).size(), "célula", "células"), _plural(count, "card", "cards")
+			]
+			var note := _flat(str(zone.get("description", "")))
+			return "%s. %s" % [summary, note] if not note.is_empty() else summary
+		"new_zone":
+			return "Nova zona"
 		"scene":
 			var scene: Dictionary = row["scene"]
 			return "%s%s, %s" % [
@@ -169,7 +259,16 @@ func _focus_text() -> String:
 	if _rows.is_empty():
 		return _current_text()
 	var row := _rows[_cursor]
-	var is_button: bool = row["kind"] != "card" or _can_edit()
+	var is_button: bool
+	match row["kind"]:
+		"header":
+			is_button = false
+		"info", "zone":
+			is_button = _is_host()
+		"card":
+			is_button = _can_edit()
+		_:
+			is_button = true
 	return "%s, botão" % _current_text() if is_button else _current_text()
 
 
@@ -185,6 +284,16 @@ func _render() -> void:
 		for i in _choice_options.size():
 			var label := str(_choice_options[i]["label"]).replace("[", "[lb]")
 			_view.append_text(("[bgcolor=#2b3a55]▶ %s[/bgcolor]\n" if i == _choice_index else "   %s\n") % label)
+		return
+	if _mode == "grid":
+		_view.append_text("%s\n" % _choice_title.replace("[", "[lb]"))
+		var grid: Dictionary = _active()["grid"]
+		for y in int(grid["rows"]):
+			var line := ""
+			for x in int(grid["cols"]):
+				var mark := "■" if _draft.has("%d,%d" % [x, y]) else ("▒" if not _cell_owner(x, y).is_empty() else "·")
+				line += "[bgcolor=#2b3a55]%s[/bgcolor] " % mark if x == _grid_x and y == _grid_y else "%s " % mark
+			_view.append_text(line + "\n")
 		return
 	if _rows.is_empty():
 		_view.append_text("[color=#9aa0a6]Nenhum card nesta cena.[/color]\n")
@@ -217,6 +326,8 @@ func _on_key(key: InputEventKey) -> void:
 	var handled := false
 	if _mode == "choice":
 		handled = _choice_key(key)
+	elif _mode == "grid":
+		handled = _grid_key(key)
 	elif _scenes_view:
 		handled = _scenes_key(key)
 	else:
@@ -298,16 +409,18 @@ func _cards_key(key: InputEventKey) -> bool:
 			if key.echo or row.is_empty():
 				return true
 			Sfx.play("activate")
-			if row["kind"] == "new_card":
-				_edit_card("", "", "")
-			elif _can_edit():
-				var card: Dictionary = _active()["cards"][row["index"]]
-				_edit_card(str(card["id"]), str(card["title"]), str(card["text"]))
-			else:
-				Speech.say(_row_text(row), true)
+			_activate(row)
+		KEY_LEFT, KEY_RIGHT:
+			if not key.echo and row.get("kind", "") == "card":
+				_turn_clock(row, -1 if key.keycode == KEY_LEFT else 1)
+		KEY_P:
+			if not key.echo and row.get("kind", "") == "card":
+				_place_card(row)
 		KEY_DELETE:
 			if not key.echo and row.get("kind", "") == "card":
 				_confirm_remove_card(row)
+			elif not key.echo and row.get("kind", "") == "zone" and _is_host():
+				_confirm_remove_zone(row["zone"])
 		_:
 			return false
 	return true
@@ -381,12 +494,16 @@ func _move_card(row: Dictionary, direction: int) -> void:
 		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
 		return
 	var cards: Array = _active()["cards"]
+	# Só troca com cards da mesma zona (ou da coluna de soltos): é o que se vê na seção.
+	var zone_id: Variant = cards[row["index"]].get("zoneId")
 	var target: int = int(row["index"]) + direction
+	while target >= 0 and target < cards.size() and cards[target].get("zoneId") != zone_id:
+		target += direction
 	if target < 0 or target >= cards.size():
 		Sfx.play("edge")
 		return
 	# O cursor acompanha o card movido.
-	_cursor = target
+	_follow = str(cards[row["index"]]["id"])
 	Sfx.play("tick", 1.2 if direction < 0 else 0.8)
 	_op({"type": "card:move", "cardId": cards[row["index"]]["id"], "direction": direction})
 
@@ -404,6 +521,283 @@ func _confirm_remove_card(row: Dictionary) -> void:
 			if confirmed:
 				_op({"type": "card:remove", "cardId": card["id"]})
 	)
+
+
+func _activate(row: Dictionary) -> void:
+	match row["kind"]:
+		"new_card":
+			_new_card()
+		"card":
+			if not _can_edit():
+				Speech.say(_row_text(row), true)
+				return
+			var card: Dictionary = _active()["cards"][row["index"]]
+			if card.get("kind", "note") == "clock":
+				_edit_clock(card)
+			else:
+				_edit_card(str(card["id"]), str(card["title"]), str(card["text"]))
+		"info":
+			if _is_host():
+				_begin_edit("Descrição da cena", str(_active().get("description", "")), func(text: String) -> void:
+					_op({"type": "scene:describe", "sceneId": _active()["id"], "description": text}), true)
+			else:
+				Speech.say(_row_text(row), true)
+		"background":
+			_begin_choice("Fundo da cena.", [
+				{"label": "Escolher uma imagem", "value": "pick"},
+				{"label": "Tirar o fundo", "value": "clear"},
+			], func(choice: String) -> void:
+				if choice == "clear":
+					_op({"type": "scene:background", "sceneId": _active()["id"], "mediaId": null})
+				else:
+					_pick_image(func(media_id: String) -> void:
+						_op({"type": "scene:background", "sceneId": _active()["id"], "mediaId": media_id})))
+		"grid":
+			var grid: Dictionary = _active()["grid"]
+			_begin_edit("Colunas do grid, de 1 a 24", str(grid["cols"]), func(cols: String) -> void:
+				_begin_edit("Linhas do grid, de 1 a 16", str(grid["rows"]), func(rows: String) -> void:
+					if cols.is_valid_int() and rows.is_valid_int():
+						_op({"type": "scene:grid", "sceneId": _active()["id"], "cols": int(cols), "rows": int(rows)})
+					else:
+						Sfx.play("error")
+						Speech.say("Use números.", true)))
+		"zone":
+			if _is_host():
+				_edit_zone(row["zone"])
+			else:
+				Speech.say(_row_text(row), true)
+		"new_zone":
+			_edit_zone({})
+
+
+## Nota, imagem ou relógio.
+func _new_card() -> void:
+	_begin_choice("Que tipo de card?", [
+		{"label": "Nota, título e texto", "value": "note"},
+		{"label": "Imagem, escolhida num arquivo", "value": "image"},
+		{"label": "Relógio, com segmentos para preencher", "value": "clock"},
+	], _start_card)
+
+
+func _start_card(kind: String) -> void:
+	if kind == "image":
+		_pick_image(_new_image_card)
+	elif kind == "clock":
+		_begin_edit("Título do relógio", "", _new_clock_card)
+	else:
+		_edit_card("", "", "")
+
+
+func _new_image_card(media_id: String) -> void:
+	_begin_edit("Título da imagem", "", func(title: String) -> void:
+		_begin_edit("Descrição da imagem, lida para quem não a vê", "", func(text: String) -> void:
+			if title.strip_edges().is_empty() and text.strip_edges().is_empty():
+				return
+			_op({"type": "card:add", "id": _new_id(), "title": title, "text": text, "kind": "image", "mediaId": media_id}),
+			true))
+
+
+func _new_clock_card(title: String) -> void:
+	if title.strip_edges().is_empty():
+		return
+	_choose_segments(6, func(segments: int) -> void:
+		_op({"type": "card:add", "id": _new_id(), "title": title, "text": "", "kind": "clock", "segments": segments}))
+
+func _choose_segments(current: int, done: Callable) -> void:
+	var options: Array = []
+	for n in SEGMENT_CHOICES:
+		options.append({"label": "%d segmentos%s" % [n, ", atual" if n == current else ""], "value": n})
+	_begin_choice("Quantos segmentos?", options, done)
+
+
+func _edit_clock(card: Dictionary) -> void:
+	var clock: Dictionary = card["clock"]
+	_begin_edit("Título do relógio", str(card["title"]), func(title: String) -> void:
+		_choose_segments(int(clock["segments"]), func(segments: int) -> void:
+			_op({"type": "card:edit", "cardId": card["id"], "title": title, "text": str(card["text"]), "segments": segments})))
+
+
+func _turn_clock(row: Dictionary, delta: int) -> void:
+	var card: Dictionary = _active()["cards"][row["index"]]
+	if card.get("kind", "note") != "clock":
+		return
+	if not _can_edit():
+		Sfx.play("error")
+		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
+		return
+	var clock: Dictionary = card["clock"]
+	var target := clampi(int(clock["filled"]) + delta, 0, int(clock["segments"]))
+	if target == int(clock["filled"]):
+		Sfx.play("edge")
+		return
+	Sfx.play("tick", 0.8 + 0.5 * float(target) / maxf(1.0, float(clock["segments"])))
+	_op({"type": "card:clock", "cardId": card["id"], "filled": target})
+
+
+func _place_card(row: Dictionary) -> void:
+	if not _can_edit():
+		Sfx.play("error")
+		Speech.say("Só o anfitrião mexe nos cards desta mesa.", true)
+		return
+	var card: Dictionary = _active()["cards"][row["index"]]
+	var options: Array = [{"label": "Soltar, volta para os cards soltos", "value": ""}]
+	for zone in _active()["zones"]:
+		options.append({"label": "Zona %s" % zone["name"], "value": str(zone["id"])})
+	if options.size() == 1:
+		Speech.say("Não há zonas nesta cena. O anfitrião cria zonas no fim da lista.", true)
+		return
+	_begin_choice("Onde fica %s?" % card["title"], options, func(zone_id: String) -> void:
+		_follow = str(card["id"])
+		_op({"type": "card:place", "cardId": card["id"], "zoneId": null if zone_id.is_empty() else zone_id}))
+
+
+func _confirm_remove_zone(zone: Dictionary) -> void:
+	_begin_choice(
+		"Remover a zona %s? Os cards nela voltam a ficar soltos." % zone["name"],
+		[{"label": "Não, manter", "value": false}, {"label": "Sim, remover", "value": true}],
+		func(confirmed: bool) -> void:
+			if confirmed:
+				_op({"type": "zone:remove", "zoneId": zone["id"]})
+	)
+
+
+## Escolhe uma imagem no computador, envia ao servidor e chama `done` com o id dela.
+func _pick_image(done: Callable) -> void:
+	var started := SheetLibrary.pick(false, "Escolher imagem", "", func(path: String) -> void:
+		if path.is_empty():
+			Speech.say("Cancelado.", true)
+			return
+		Speech.say("Enviando a imagem.", true)
+		var result: Dictionary = await _client.upload_media(path)
+		if not result["ok"]:
+			Sfx.play("error")
+			Speech.say(str(result["message"]), true)
+			return
+		done.call(str(result["id"])),
+		PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Imagens"]))
+	if not started:
+		Sfx.play("error")
+		Speech.say("Este sistema não oferece o seletor de arquivos.", true)
+
+
+# --- Zonas e o grid -----------------------------------------------------------------------------
+
+## Nome, descrição e depois as células; `zone` vazio cria uma zona nova.
+func _edit_zone(zone: Dictionary) -> void:
+	var zone_id := str(zone.get("id", ""))
+	_begin_edit("Nome da zona", str(zone.get("name", "")), func(zone_name: String) -> void:
+		if zone_name.strip_edges().is_empty():
+			return
+		_begin_edit("Descrição da zona", str(zone.get("description", "")), func(description: String) -> void:
+			_begin_grid(zone_id, zone.get("cells", []), func(cells: Array) -> void:
+				if zone_id.is_empty():
+					_op({"type": "zone:add", "id": _new_id(), "name": zone_name, "description": description, "cells": cells})
+				else:
+					_op({"type": "zone:edit", "zoneId": zone_id, "name": zone_name, "description": description, "cells": cells}),
+			), true))
+
+
+func _cell_owner(x: int, y: int) -> String:
+	for zone in _active()["zones"]:
+		if zone["id"] == _grid_zone_id:
+			continue
+		for cell in zone["cells"]:
+			if int(cell["x"]) == x and int(cell["y"]) == y:
+				return str(zone["name"])
+	return ""
+
+
+func _begin_grid(zone_id: String, cells: Array, done: Callable) -> void:
+	_mode = "grid"
+	_grid_zone_id = zone_id
+	_grid_done = done
+	_draft = {}
+	for cell in cells:
+		_draft["%d,%d" % [int(cell["x"]), int(cell["y"])]] = true
+	_grid_x = 0
+	_grid_y = 0
+	_choice_title = "Células da zona. Setas movem, Espaço marca, Enter confirma, Escape cancela."
+	_render()
+	Sfx.play("open_input")
+	Speech.say("%s %s" % [_choice_title, _cell_text()], true)
+
+
+func _cell_text() -> String:
+	var state := "marcada" if _draft.has("%d,%d" % [_grid_x, _grid_y]) else "livre"
+	var holder := _cell_owner(_grid_x, _grid_y)
+	if not holder.is_empty() and state == "livre":
+		state = "da zona %s" % holder
+	return "Coluna %d, linha %d, %s" % [_grid_x + 1, _grid_y + 1, state]
+
+
+func _grid_key(key: InputEventKey) -> bool:
+	var grid: Dictionary = _active()["grid"]
+	var dx := 0
+	var dy := 0
+	match key.keycode:
+		KEY_LEFT:
+			dx = -1
+		KEY_RIGHT:
+			dx = 1
+		KEY_UP:
+			dy = -1
+		KEY_DOWN:
+			dy = 1
+		KEY_H:
+			Speech.say(HELP_GRID, true)
+			return true
+		KEY_ESCAPE:
+			_mode = "browse"
+			_rebuild()
+			Sfx.play("close_input")
+			Speech.say("Cancelado.", true)
+			return true
+		KEY_SPACE:
+			if key.echo:
+				return true
+			var cell_key := "%d,%d" % [_grid_x, _grid_y]
+			if not _cell_owner(_grid_x, _grid_y).is_empty():
+				Sfx.play("error")
+				Speech.say("Essa célula é da zona %s." % _cell_owner(_grid_x, _grid_y), true)
+			else:
+				if _draft.has(cell_key):
+					_draft.erase(cell_key)
+				else:
+					_draft[cell_key] = true
+				Sfx.play("tick", 1.2 if _draft.has(cell_key) else 0.8)
+				_render()
+				Speech.say(_cell_text(), true)
+			return true
+		KEY_ENTER, KEY_KP_ENTER:
+			if key.echo:
+				return true
+			if _draft.is_empty():
+				Sfx.play("error")
+				Speech.say("Marque ao menos uma célula.", true)
+				return true
+			var cells: Array = []
+			for cell_key in _draft:
+				var parts: PackedStringArray = str(cell_key).split(",")
+				cells.append({"x": int(parts[0]), "y": int(parts[1])})
+			var done := _grid_done
+			_mode = "browse"
+			_rebuild()
+			Sfx.play("msg_out")
+			done.call(cells)
+			return true
+		_:
+			return true
+	var nx := _grid_x + dx
+	var ny := _grid_y + dy
+	if nx < 0 or ny < 0 or nx >= int(grid["cols"]) or ny >= int(grid["rows"]):
+		Sfx.play("edge")
+		return true
+	_grid_x = nx
+	_grid_y = ny
+	Sfx.play("focus_button", 0.8 + 0.5 * float(nx) / maxf(1.0, float(grid["cols"])))
+	_render()
+	Speech.say(_cell_text(), true)
+	return true
 
 
 # --- Escolha e edição ---------------------------------------------------------------------------
@@ -493,6 +887,16 @@ func _on_edit_cancelled() -> void:
 func _on_scene_changed(_scene: Dictionary) -> void:
 	if _mode == "browse":
 		_rebuild()
+	else:
+		_canvas.show_scene(_active())
+	# Quando o anfitrião troca de cena, todos ouvem o nome e a descrição.
+	var active_id := str(_client.scene.get("activeId", ""))
+	if active_id != _seen_active:
+		_seen_active = active_id
+		_announce_next = false
+		var description := _flat(str(_active().get("description", "")))
+		Speech.say("Cena %s. %s" % [_active()["name"], description] if not description.is_empty() else "Cena %s." % _active()["name"], false)
+		return
 	# A cena ativa mudou de nome ou foi excluída: sai da lista de cenas se não houver mais o que ver.
 	if _announce_next and _mode == "browse":
 		_announce_next = false

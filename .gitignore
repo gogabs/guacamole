@@ -12,3 +12,4 @@ data/*.tmp
 .godot/
 *.import
 client/addons/prismatoid/bin/
+data/media/

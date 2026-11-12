@@ -11,6 +11,7 @@ signal sheet_removed(character_id: String)
 signal scene_changed(scene: Dictionary)
 signal compendiums_changed(ids: Array)
 signal compendium_item_received(compendium_id: String, item: Dictionary)
+signal media_ready(media_id: String)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -29,6 +30,9 @@ var catalog: Array = []
 var compendiums: Array = []
 
 var _items: Dictionary = {}  # "compêndio/item" -> conteúdo já recebido
+var _token := ""
+var _textures: Dictionary = {}  # id da mídia -> Texture2D já baixada
+var _downloading: Dictionary = {}
 var _ws := WebSocketPeer.new()
 var _active := false
 var _opened := false
@@ -78,6 +82,7 @@ func connect_to_room(room_id: String, player_name: String, token: String = "") -
 	if not token.is_empty():
 		url += "&token=" + token.uri_encode()
 	_opened = false
+	_token = token
 	_active = _ws.connect_to_url(url) == OK
 	if not _active:
 		disconnected.emit("Endereço de servidor inválido.")
@@ -188,7 +193,73 @@ func roll_oracle(compendium_id: String, item_id: String, target: Dictionary, pri
 	})
 
 
+## Envia um arquivo da mesa (imagem). Devolve {ok, id, message}; o id é o hash do conteúdo.
+func upload_media(path: String) -> Dictionary:
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.is_empty():
+		return {"ok": false, "id": "", "message": "Não foi possível ler o arquivo."}
+	var query := "?name=%s&filename=%s" % [str(you.get("name", "")).uri_encode(), path.get_file().uri_encode()]
+	if not _token.is_empty():
+		query += "&token=" + _token.uri_encode()
+	var request := HTTPRequest.new()
+	add_child(request)
+	var url := "%s/api/rooms/%s/media%s" % [http_base, str(room.get("id", "")).uri_encode(), query]
+	if request.request_raw(url, PackedStringArray(), HTTPClient.METHOD_POST, bytes) != OK:
+		request.queue_free()
+		return {"ok": false, "id": "", "message": "Não foi possível contatar o servidor."}
+	var result: Array = await request.request_completed
+	request.queue_free()
+	if result[0] != HTTPRequest.RESULT_SUCCESS:
+		return {"ok": false, "id": "", "message": "Não foi possível contatar o servidor."}
+	var parsed: Variant = JSON.parse_string((result[3] as PackedByteArray).get_string_from_utf8())
+	var data: Dictionary = parsed if parsed is Dictionary else {}
+	var ok: bool = int(result[1]) >= 200 and int(result[1]) < 300
+	return {"ok": ok, "id": str(data.get("id", "")), "message": str(data.get("message", "Erro do servidor."))}
+
+
+## A imagem da mesa com esse id, se já foi baixada; senão começa a baixar e devolve null.
+## `media_ready` avisa quando chegar.
+func media_texture(media_id: String) -> Texture2D:
+	if media_id.is_empty():
+		return null
+	if _textures.has(media_id):
+		return _textures[media_id]
+	if not _downloading.has(media_id):
+		_downloading[media_id] = true
+		_download_media(media_id)
+	return null
+
+
+func _download_media(media_id: String) -> void:
+	var request := HTTPRequest.new()
+	add_child(request)
+	var url := "%s/api/rooms/%s/media/%s" % [http_base, str(room.get("id", "")).uri_encode(), media_id]
+	if request.request(url) != OK:
+		request.queue_free()
+		_downloading.erase(media_id)
+		return
+	var result: Array = await request.request_completed
+	request.queue_free()
+	_downloading.erase(media_id)
+	if result[0] != HTTPRequest.RESULT_SUCCESS or int(result[1]) != 200:
+		return
+	var image := Image.new()
+	var bytes: PackedByteArray = result[3]
+	var error := image.load_png_from_buffer(bytes)
+	if error != OK:
+		error = image.load_jpg_from_buffer(bytes)
+	if error != OK:
+		error = image.load_webp_from_buffer(bytes)
+	if error != OK:
+		return
+	_textures[media_id] = ImageTexture.create_from_image(image)
+	media_ready.emit(media_id)
+
+
 func leave() -> void:
+	_textures = {}
+	_downloading = {}
+	_token = ""
 	if _active:
 		_ws.close()
 	_active = false

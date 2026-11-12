@@ -84,3 +84,75 @@ Deno.test("cena: estado corrompido volta ao inicial", () => {
   });
   assertEquals([kept.activeId, kept.scenes[0].cards.length, kept.editors], ["s", 1, "host"]);
 });
+
+Deno.test("cena: zonas ocupam várias células e nenhuma célula é de duas zonas", () => {
+  let state = createSceneState();
+  const id = state.scenes[0].id;
+  const cells = [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 1, y: 1 }];
+  state = applySceneOp(state, { type: "zone:add", id: "z1", name: "Altar", description: "Pedra fria.", cells }, true).state;
+  assertEquals(state.scenes[0].zones[0].cells, [{ x: 1, y: 1 }, { x: 2, y: 1 }]);
+  assertThrows(() => applySceneOp(state, { type: "zone:add", id: "z2", name: "Outra", description: "", cells: [{ x: 2, y: 1 }] }, true), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "zone:add", id: "z2", name: "Fora", description: "", cells: [{ x: 99, y: 0 }] }, true), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "zone:add", id: "z2", name: "Jogador", description: "", cells: [{ x: 0, y: 0 }] }, false), SceneError);
+
+  // Editar a própria zona pode reaproveitar suas células.
+  state = applySceneOp(state, { type: "zone:edit", zoneId: "z1", name: "Altar", description: "", cells: [{ x: 2, y: 1 }, { x: 3, y: 1 }] }, true).state;
+  assertEquals(state.scenes[0].zones[0].cells.length, 2);
+
+  // Reduzir o grid corta as células e solta os tokens de zonas que somem.
+  state = applySceneOp(state, { type: "card:add", id: "t", title: "Goblin", text: "", zoneId: "z1" }, false).state;
+  assertEquals(state.scenes[0].cards[0].zoneId, "z1");
+  state = applySceneOp(state, { type: "scene:grid", sceneId: id, cols: 3, rows: 6 }, true).state;
+  assertEquals(state.scenes[0].zones[0].cells, [{ x: 2, y: 1 }]);
+  state = applySceneOp(state, { type: "scene:grid", sceneId: id, cols: 1, rows: 1 }, true).state;
+  assertEquals([state.scenes[0].zones.length, state.scenes[0].cards[0].zoneId], [0, null]);
+});
+
+Deno.test("cena: cards soltos viram tokens ao serem postos numa zona", () => {
+  let state = createSceneState();
+  state = applySceneOp(state, { type: "zone:add", id: "z1", name: "Porta", description: "", cells: [{ x: 0, y: 0 }] }, true).state;
+  state = applySceneOp(state, { type: "card:add", id: "c", title: "Chave", text: "Enferrujada." }, false).state;
+  assertEquals(state.scenes[0].cards[0].zoneId, null);
+  const placed = applySceneOp(state, { type: "card:place", cardId: "c", zoneId: "z1" }, false);
+  assertEquals(placed.state.scenes[0].cards[0].zoneId, "z1");
+  assertEquals(placed.message("Ana"), "Ana pôs Chave na zona Porta.");
+  assertThrows(() => applySceneOp(state, { type: "card:place", cardId: "c", zoneId: "nada" }, false), SceneError);
+  const loose = applySceneOp(placed.state, { type: "card:place", cardId: "c", zoneId: null }, false);
+  assertEquals(loose.state.scenes[0].cards[0].zoneId, null);
+  // Remover a zona solta o token.
+  const removed = applySceneOp(placed.state, { type: "zone:remove", zoneId: "z1" }, true).state;
+  assertEquals(removed.scenes[0].cards[0].zoneId, null);
+});
+
+Deno.test("cena: relógios e imagens", () => {
+  let state = createSceneState();
+  const known = (id: string) => id === "abc";
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "i", title: "Mapa", text: "", kind: "image", mediaId: "xyz" }, true, known), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "card:add", id: "i", title: "Mapa", text: "", kind: "image" }, true, known), SceneError);
+  state = applySceneOp(state, { type: "card:add", id: "i", title: "Mapa", text: "Um mapa rasgado.", kind: "image", mediaId: "abc" }, true, known).state;
+  assertEquals(state.scenes[0].cards[0].mediaId, "abc");
+
+  state = applySceneOp(state, { type: "card:add", id: "r", title: "Ritual", text: "", kind: "clock", segments: 6 }, false).state;
+  const turned = applySceneOp(state, { type: "card:clock", cardId: "r", filled: 4 }, false);
+  assertEquals(turned.state.scenes[0].cards[1].clock, { segments: 6, filled: 4 });
+  assertEquals(turned.message("Ana"), "Ana pôs o relógio Ritual em 4 de 6.");
+  assertEquals(applySceneOp(turned.state, { type: "card:clock", cardId: "r", filled: 99 }, false).state.scenes[0].cards[1].clock?.filled, 6);
+  assertThrows(() => applySceneOp(state, { type: "card:clock", cardId: "i", filled: 1 }, false), SceneError);
+  // Menos segmentos corta o que estava preenchido.
+  const shrunk = applySceneOp(turned.state, { type: "card:edit", cardId: "r", title: "Ritual", text: "", segments: 3 }, false).state;
+  assertEquals(shrunk.scenes[0].cards[1].clock, { segments: 3, filled: 3 });
+});
+
+Deno.test("cena: fundo e descrição são do anfitrião; estado antigo é completado", () => {
+  let state = createSceneState();
+  const id = state.scenes[0].id;
+  assertThrows(() => applySceneOp(state, { type: "scene:describe", sceneId: id, description: "x" }, false), SceneError);
+  assertThrows(() => applySceneOp(state, { type: "scene:background", sceneId: id, mediaId: "abc" }, true, () => false), SceneError);
+  state = applySceneOp(state, { type: "scene:background", sceneId: id, mediaId: "abc" }, true).state;
+  state = applySceneOp(state, { type: "scene:describe", sceneId: id, description: "Uma floresta escura." }, true).state;
+  assertEquals([state.scenes[0].background, state.scenes[0].description], ["abc", "Uma floresta escura."]);
+
+  const old = normalizeSceneState({ scenes: [{ id: "s", name: "Velha", cards: [{ id: "c", title: "Oi", text: "" }] }], activeId: "s" });
+  assertEquals(old.scenes[0].grid, { cols: 8, rows: 6 });
+  assertEquals([old.scenes[0].zones, old.scenes[0].cards[0].kind, old.scenes[0].cards[0].zoneId], [[], "note", null]);
+});

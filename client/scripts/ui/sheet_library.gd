@@ -124,11 +124,16 @@ static func read_file(path: String) -> Array[Dictionary]:
 
 ## Abre o diálogo nativo de arquivos do sistema. `done` recebe o caminho escolhido ou "" se cancelou.
 ## Devolve false quando o sistema não oferece o diálogo.
-static func pick(save_mode: bool, title: String, suggested: String, done: Callable) -> bool:
+static func pick(
+	save_mode: bool,
+	title: String,
+	suggested: String,
+	done: Callable,
+	filters: PackedStringArray = PackedStringArray(["*.json, *.zip ; Fichas do Guacamole"]),
+) -> bool:
 	if not DisplayServer.has_feature(DisplayServer.FEATURE_NATIVE_DIALOG_FILE):
 		return false
 	var mode := DisplayServer.FILE_DIALOG_MODE_SAVE_FILE if save_mode else DisplayServer.FILE_DIALOG_MODE_OPEN_FILE
-	var filters := PackedStringArray(["*.json, *.zip ; Fichas do Guacamole"])
 	DisplayServer.file_dialog_show(
 		title, "", suggested, false, mode, filters,
 		func(status: bool, paths: PackedStringArray, _filter: int) -> void:

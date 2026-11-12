@@ -1,4 +1,4 @@
-extends SceneTree
+﻿extends SceneTree
 ## Dois clientes numa mesa: um só pela camada de rede (Ana) e um dirigindo a interface real (Caio).
 ## Uso: godot --headless --path client --script res://tests/two_clients.gd -- 127.0.0.1:8000
 
@@ -335,9 +335,12 @@ func _run() -> void:
 	var scene_panel: Control = table._scene
 	await _key(KEY_TAB, KEY_TAB)
 	_check(root.gui_get_focus_owner() == scene_panel._zone, "Tab leva da ficha à região de cena")
-	_check(scene_panel._rows.size() == 1 and scene_panel._rows[0]["kind"] == "new_card", "cena vazia: só Adicionar card")
+	_check(scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["info", "header", "new_card"], "cena vazia: descrição, cabeçalho dos soltos e Adicionar card")
+	scene_panel._cursor = 2
 	await _key(KEY_ENTER, KEY_ENTER)
-	_check(scene_panel._edit.visible, "Enter em Adicionar card pede o título")
+	_check(scene_panel._mode == "choice", "Adicionar card pergunta o tipo")
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(scene_panel._edit.visible, "nota pede o título")
 	scene_panel._edit.text = "Taverna"
 	scene_panel._edit.text_submitted.emit("Taverna")
 	_check(scene_panel._area.visible, "depois do título vem o texto, multilinha")
@@ -352,6 +355,7 @@ func _run() -> void:
 	_check(not scene_panel._scenes_view, "S não abre a lista de cenas para quem não é anfitrião")
 	ana.scene_op({"type": "scene:create", "id": "s2", "name": "Duelo"})
 	_check(await _wait(func() -> bool: return scene_panel._title() == "Cena: Duelo"), "Ana (anfitriã) cria outra cena e Caio vê a troca")
+	await _key(KEY_ENTER, KEY_ENTER)
 	await _key(KEY_ENTER, KEY_ENTER)
 	scene_panel._edit.text = "Ponte"
 	scene_panel._edit.text_submitted.emit("Ponte")
@@ -372,13 +376,49 @@ func _run() -> void:
 	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).size() == 1), "revelar entrega o card a Caio")
 	_check(table.entries.any(func(e: Dictionary) -> bool: return e["kind"] == "system" and str(e["text"]).contains("revelou o card Segredo")), "o histórico anuncia a revelação")
 	await _key(KEY_V, KEY_V)
-	_check(scene_panel._rows[0]["kind"] == "card" and not (table._client.scene["scenes"][1]["cards"] as Array)[0]["hidden"], "V não oculta para quem não é anfitrião")
+	_check(scene_panel._rows[2]["kind"] == "card" and not (table._client.scene["scenes"][1]["cards"] as Array)[0]["hidden"], "V não oculta para quem não é anfitrião")
 	ana.scene_op({"type": "card:remove", "cardId": "seg"})
 	_check(await _wait(func() -> bool: return (table._client.scene["scenes"][1]["cards"] as Array).is_empty()), "card revelado removido")
 	_check(table._client.templates.size() == 5, "o servidor oferece 5 modelos de ficha")
+
+	# Zonas, relógio e tokens: Ana cria, Caio navega por seções e mexe no que pode.
+	ana.scene_op({"type": "zone:add", "id": "z1", "name": "Altar", "description": "Pedra fria.", "cells": [{"x": 1, "y": 1}, {"x": 2, "y": 1}]})
+	ana.scene_op({"type": "card:add", "id": "rel", "title": "Ritual", "text": "", "kind": "clock", "segments": 6})
+	_check(await _wait(func() -> bool: return scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["info", "header", "card", "new_card", "zone"]), "a zona e o relógio chegam em seções, o relógio solto")
+	_check(scene_panel._row_text(scene_panel._rows[2]) == "Relógio, Ritual, 0 de 6", "o relógio fala o progresso")
+	scene_panel._cursor = 2
+	await _key(KEY_RIGHT, KEY_RIGHT)
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][1]["cards"] as Array)[0]["clock"]["filled"] == 1), "Direita avança o relógio para todos")
+	await _key(KEY_P, KEY_P)
+	_check(scene_panel._mode == "choice", "P pergunta onde fica o card")
+	await _key(KEY_DOWN, KEY_DOWN)
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(await _wait(func() -> bool: return (ana.scene["scenes"][1]["cards"] as Array)[0]["zoneId"] == "z1"), "o card vira token da zona")
+	_check(scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["info", "header", "new_card", "zone", "card"], "o card passa para a seção da zona")
+	_check(scene_panel._rows[scene_panel._cursor]["kind"] == "card", "o cursor acompanha o card")
+	_check(scene_panel._row_text(scene_panel._rows[3]).contains("Altar") and scene_panel._row_text(scene_panel._rows[3]).contains("2 células"), "a zona fala nome e tamanho")
+	scene_panel._cursor = 3
+	await _key(KEY_ENTER, KEY_ENTER)
+	_check(scene_panel._mode == "browse" and not scene_panel._edit.visible, "quem não é anfitrião só ouve a zona")
+
+	# Imagem: o envio ao servidor e o download por outro cliente.
+	var png := Image.create(2, 2, false, Image.FORMAT_RGB8)
+	png.fill(Color.RED)
+	var png_path := ProjectSettings.globalize_path("user://test_fundo.png")
+	png.save_png(png_path)
+	var uploaded: Dictionary = await ana.upload_media(png_path)
+	_check(uploaded["ok"] and str(uploaded["id"]).length() == 64, "Ana envia uma imagem ao servidor")
+	var refused: Dictionary = await ana.upload_media(ProjectSettings.globalize_path("res://project.godot"))
+	_check(not refused["ok"], "o servidor recusa arquivo que não é imagem")
+	ana.scene_op({"type": "scene:background", "sceneId": "s2", "mediaId": uploaded["id"]})
+	_check(await _wait(func() -> bool: return table._client.scene["scenes"][1]["background"] == uploaded["id"]), "o fundo chega a Caio")
+	table._client.media_texture(str(uploaded["id"]))
+	_check(await _wait(func() -> bool: return table._client.media_texture(str(uploaded["id"])) != null), "Caio baixa a imagem do fundo")
+	DirAccess.remove_absolute(png_path)
+
 	ana.scene_op({"type": "scene:editors", "editors": "host"})
 	_check(await _wait(func() -> bool: return table._client.scene["editors"] == "host"), "Ana restringe a edição dos cards")
-	_check(await _wait(func() -> bool: return scene_panel._rows.is_empty()), "Caio deixa de ver Adicionar card")
+	_check(await _wait(func() -> bool: return scene_panel._rows.map(func(r: Dictionary) -> String: return r["kind"]) == ["info", "header", "zone", "card"]), "Caio deixa de ver Adicionar card")
 	sheets._zone.grab_focus()
 
 	# Compêndios: terceira região, adicionar, abrir itens, rolar oráculos e escolher ativos.

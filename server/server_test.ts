@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
+﻿import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import type { ClientMessage, ServerMessage } from "../core/protocol.ts";
 import { startServer } from "./main.ts";
 
@@ -209,5 +209,55 @@ Deno.test("histórico sobrevive a reinício do servidor", async () => {
     await second.shutdown();
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// PNG mínimo válido (1x1), o bastante para o servidor reconhecer o formato.
+const PNG_1X1 = Uint8Array.from(atob(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+), (c) => c.charCodeAt(0));
+
+Deno.test("mídia: envio, download, limites e uso em cards", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base, { access: "restricted" });
+    const id = created.room.id;
+    const upload = (bytes: Uint8Array, name = "Ana", token = created.hostToken) =>
+      fetch(`${base}/api/rooms/${id}/media?name=${name}&token=${token}&filename=mapa.png`, { method: "POST", body: bytes as BufferSource });
+
+    const denied = await upload(PNG_1X1, "Intruso", "errado");
+    assertEquals(denied.status, 403);
+    await denied.body?.cancel();
+
+    const text = await upload(new TextEncoder().encode("não é imagem"));
+    assertEquals(text.status, 422);
+    await text.body?.cancel();
+
+    const ok = await upload(PNG_1X1);
+    assertEquals(ok.status, 201);
+    const info = await ok.json() as { id: string; kind: string; mime: string };
+    assertEquals([info.kind, info.mime, info.id.length], ["image", "image/png", 64]);
+
+    const again = await upload(PNG_1X1);
+    assertEquals((await again.json() as { id: string }).id, info.id);
+
+    const download = await fetch(`${base}/api/rooms/${id}/media/${info.id}`);
+    assertEquals(download.headers.get("content-type"), "image/png");
+    assertEquals(new Uint8Array(await download.arrayBuffer()), PNG_1X1);
+    const missing = await fetch(`${base}/api/rooms/${id}/media/${"0".repeat(64)}`);
+    assertEquals(missing.status, 404);
+    await missing.body?.cancel();
+
+    const ana = await TestClient.connect(wsUrl(server.port, id, "Ana", created.hostToken));
+    await ana.next("welcome");
+    ana.send({ type: "scene:op", op: { type: "card:add", id: "i", title: "Mapa", text: "Um mapa.", kind: "image", mediaId: "0".repeat(64) } });
+    assertEquals((await ana.next("error")).message, "Imagem não encontrada na mesa.");
+    ana.send({ type: "scene:op", op: { type: "card:add", id: "i", title: "Mapa", text: "Um mapa.", kind: "image", mediaId: info.id } });
+    const sync = await ana.next("scene:sync");
+    assertEquals(sync.scene.scenes[0].cards[0].mediaId, info.id);
+    await ana.close();
+  } finally {
+    await server.shutdown();
   }
 });

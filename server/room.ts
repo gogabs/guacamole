@@ -17,6 +17,7 @@ import { applySceneOp, createSceneState, SceneError, type SceneState } from "../
 import { cleanDescription, createCharacter, importCharacter, SheetError } from "../core/sheet/fields.ts";
 import { applySheetOp, burnMomentum, rollFromField } from "../core/sheet/ops.ts";
 import { BUILT_IN_TEMPLATES } from "../core/sheet/templates/mod.ts";
+import type { MediaInfo } from "./media.ts";
 
 export const MAX_HISTORY = 500;
 export const WELCOME_HISTORY = 200;
@@ -33,6 +34,8 @@ export interface RoomRecord {
   nextSeq: number;
   characters: RoomCharacter[];
   scene: SceneState;
+  /** Arquivos de mídia enviados à mesa; os bytes ficam no MediaStore. */
+  media: MediaInfo[];
   /** Ids dos compêndios adicionados à mesa, na ordem em que entraram. */
   compendiums: string[];
   /** Última rolagem de Ironsworn por ficha, para queimar momentum. Só em memória útil. */
@@ -57,6 +60,7 @@ export function createRoomRecord(
     nextSeq: 1,
     characters: [],
     scene: createSceneState(),
+    media: [],
     compendiums: [],
     lastRolls: {},
   };
@@ -297,7 +301,12 @@ export function handleClientMessage(
 ): MessageOutcome {
   if (message.type === "scene:op") {
     try {
-      const result = applySceneOp(room.scene, message.op, player.role === "host");
+      const result = applySceneOp(
+        room.scene,
+        message.op,
+        player.role === "host",
+        (id) => room.media.some((m) => m.id === id && m.kind === "image"),
+      );
       room.scene = result.state;
       const text = result.message(player.name);
       return { scene: room.scene, entry: text ? systemEntry(room, text) : undefined };
