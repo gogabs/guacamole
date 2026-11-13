@@ -408,6 +408,69 @@ Deno.test("mesa: exportar e importar leva cenas, fichas e compêndios para uma m
   }
 });
 
+Deno.test("diário: exporta em Lonelog só para o anfitrião, com cena, rolagem e atalhos", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1", rng: () => 0.5 });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const id = created.room.id;
+    const ana = await TestClient.connect(wsUrl(server.port, id, "Ana", created.hostToken));
+    const welcome = await ana.next("welcome");
+    const first = welcome.scene.scenes[0].id;
+    ana.send({ type: "scene:op", op: { type: "scene:create", id: "mata", name: "Mata fechada" } });
+    await ana.next("scene:sync", (m) => m.scene.scenes.length === 2);
+    ana.send({ type: "scene:op", op: { type: "scene:activate", sceneId: "mata" } });
+    await ana.next("chat:entry", (m) => m.entry.scene?.name === "Mata fechada");
+    for (const input of ["/a Sigo a trilha", "/roll 1d6+1", "/c Acho pegadas"]) {
+      ana.send({ type: "chat:send", input });
+      await ana.next("chat:entry", (m) => m.entry.kind !== "system");
+    }
+    assert(first !== "mata");
+
+    const denied = await fetch(`${base}/api/rooms/${id}/lonelog?token=errado`);
+    assertEquals(denied.status, 403);
+    await denied.body?.cancel();
+    const { markdown } = await (await fetch(`${base}/api/rooms/${id}/lonelog?token=${created.hostToken}`)).json() as {
+      markdown: string;
+    };
+    assert(markdown.startsWith("---\ntitle: Mesa de teste\n"));
+    assert(markdown.includes("### S1 *Mata fechada*"));
+    assert(markdown.includes("@ Sigo a trilha\nd: 1d6+1=5 (4)\n=> Acho pegadas"));
+    await ana.close();
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("legendas: vão só para os outros, sem histórico, e legenda vazia é erro", async () => {
+  const server = await startServer({ port: 0, hostname: "127.0.0.1" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const created = await createRoom(base);
+    const ana = await TestClient.connect(wsUrl(server.port, created.room.id, "Ana", created.hostToken));
+    await ana.next("welcome");
+    const bia = await TestClient.connect(wsUrl(server.port, created.room.id, "Bia"));
+    await bia.next("welcome");
+
+    bia.send({ type: "speech:caption", text: "  Eu   abro a porta.  " });
+    const caption = await ana.next("speech:caption");
+    assertEquals([caption.author, caption.text], ["Bia", "Eu abro a porta."]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assertEquals(bia.pending().filter((m) => m.type === "speech:caption").length, 0);
+
+    bia.send({ type: "speech:caption", text: "   " });
+    assert((await bia.next("error")).message.length > 0);
+
+    const { markdown } = await (await fetch(`${base}/api/rooms/${created.room.id}/lonelog?token=${created.hostToken}`))
+      .json() as { markdown: string };
+    assert(!markdown.includes("abro a porta"));
+    await ana.close();
+    await bia.close();
+  } finally {
+    await server.shutdown();
+  }
+});
+
 Deno.test("voz: o ritmo normal de fala passa inteiro pelo relay, sem perder pacotes", async () => {
   const server = await startServer({ port: 0, hostname: "127.0.0.1" });
   const base = `http://127.0.0.1:${server.port}`;

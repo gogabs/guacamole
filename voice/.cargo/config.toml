@@ -1,2 +1,11 @@
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# Sem otimizar para a CPU de quem compila: o pacote roda em outros computadores. AVX2 e FMA existem
+# em qualquer processador de mesa dos últimos dez anos.
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"

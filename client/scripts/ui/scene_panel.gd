@@ -21,6 +21,7 @@ const SheetLibrary := preload("res://scripts/ui/sheet_library.gd")
 const CardDetail := preload("res://scripts/ui/card_detail.gd")
 const SceneFile := preload("res://scripts/ui/scene_file.gd")
 const TableFile := preload("res://scripts/ui/table_file.gd")
+const LonelogFile := preload("res://scripts/ui/lonelog_file.gd")
 
 const SEGMENT_CHOICES := [4, 6, 8, 10, 12]
 const DURATION_PROMPT := "Duração: minutos e segundos como 2:30, ou só os minutos"
@@ -208,6 +209,7 @@ func _rebuild() -> void:
 			_rows.append({"kind": "save_scene"})
 			_rows.append({"kind": "load_scene"})
 			_rows.append({"kind": "save_table"})
+			_rows.append({"kind": "save_lonelog"})
 		_rows.append({"kind": "editors"})
 	else:
 		var scene := _active()
@@ -323,6 +325,8 @@ func _row_text(row: Dictionary) -> String:
 			return "Carregar cena de arquivo"
 		"save_table":
 			return "Salvar a mesa inteira em arquivo"
+		"save_lonelog":
+			return "Salvar o diário da sessão (Lonelog)"
 	return "Quem edita os cards: %s" % ("todos" if _client.scene.get("editors") == "everyone" else "só o anfitrião")
 
 
@@ -591,6 +595,8 @@ func _scenes_key(key: InputEventKey) -> bool:
 					_begin_choice("Incluir o histórico do chat?",
 						[{"label": "Não, só a mesa", "value": false}, {"label": "Sim, com o histórico", "value": true}],
 						_save_table)
+				"save_lonelog":
+					_save_lonelog()
 				"editors":
 					var next := "host" if _client.scene.get("editors") == "everyone" else "everyone"
 					_op({"type": "scene:editors", "editors": next})
@@ -643,6 +649,24 @@ func _save_table(include_history: bool) -> void:
 		Sfx.play("msg_out" if result["ok"] else "error")
 		Speech.say(str(result["message"]), true),
 		PackedStringArray(["*.%s ; Mesa do Guacamole" % TableFile.EXTENSION]))
+	if not started:
+		Sfx.play("error")
+		Speech.say("Este sistema não oferece o seletor de arquivos.", true)
+
+
+func _save_lonelog() -> void:
+	var suggested := "%s.md" % str(_client.room.get("name", "Diario"))
+	var started := SheetLibrary.pick(true, "Salvar diário", suggested, func(path: String) -> void:
+		if path.is_empty():
+			Speech.say("Cancelado.", true)
+			return
+		if path.get_extension().to_lower() != "md":
+			path += ".md"
+		Speech.say("Salvando o diário.", true)
+		var result: Dictionary = await LonelogFile.save(_client, path)
+		Sfx.play("msg_out" if result["ok"] else "error")
+		Speech.say(str(result["message"]), true),
+		PackedStringArray(["*.md ; Diário em Lonelog"]))
 	if not started:
 		Sfx.play("error")
 		Speech.say("Este sistema não oferece o seletor de arquivos.", true)

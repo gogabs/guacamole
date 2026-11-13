@@ -15,6 +15,8 @@ extends Node
 signal speakers_changed
 ## O modo de posicionamento mudou (hrtf, pan ou off): os sons da cena seguem o mesmo modo.
 signal spatial_changed(mode: String)
+## O que o microfone captou neste quadro (antes de qualquer filtro), para quem também ouve o microfone.
+signal mic_frames(frames: PackedVector2Array)
 
 const PTT_KEY := KEY_F4
 const BUS := "VozCaptura"
@@ -61,6 +63,7 @@ var _mic: AudioStreamPlayer
 var _peers: Dictionary = {}  # nome -> {player, playback, heard}
 var _speaking: Dictionary = {}  # nome -> true enquanto fala
 var _talking := false
+var _mic_listeners := 0
 
 
 func setup(client: Node) -> void:
@@ -129,10 +132,23 @@ func set_mode(value: String) -> void:
 		return
 	mode = value
 	_talking = false
-	if mode == "off":
-		_stop_mic()
-	else:
+	_sync_mic()
+
+
+## Quem quer ouvir o microfone sem transmitir (o ditado) pede e devolve com isto; o microfone só
+## fica aberto enquanto a voz ou alguém precisar dele.
+func listen_to_mic(on: bool) -> void:
+	_mic_listeners = maxi(0, _mic_listeners + (1 if on else -1))
+	_sync_mic()
+
+
+func _sync_mic() -> void:
+	if not available():
+		return
+	if mode != "off" or _mic_listeners > 0:
 		_start_mic()
+	else:
+		_stop_mic()
 
 
 func cycle_mode() -> void:
@@ -194,9 +210,9 @@ func output_devices() -> PackedStringArray:
 func set_input_device(device: String) -> void:
 	AudioServer.input_device = device
 	_save_settings()
-	if mode != "off":
+	if _mic != null:
 		_stop_mic()
-		_start_mic()
+		_sync_mic()
 
 
 func set_output_device(device: String) -> void:
@@ -250,6 +266,7 @@ func _process(_delta: float) -> void:
 	var frames := _capture.get_buffer(_capture.get_frames_available())
 	if frames.is_empty():
 		return
+	mic_frames.emit(frames)
 	if not talking:
 		transmitting = false
 		return

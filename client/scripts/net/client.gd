@@ -14,6 +14,7 @@ signal compendium_item_received(compendium_id: String, item: Dictionary)
 signal media_ready(media_id: String)
 signal audio_fired(card_id: String)
 signal voice_received(peer: String, packet: PackedByteArray)
+signal caption_received(author: String, text: String)
 signal server_error(message: String)
 signal disconnected(reason: String)
 
@@ -77,6 +78,12 @@ func export_room(include_history: bool) -> Dictionary:
 	return await _request(HTTPClient.METHOD_GET, path, {})
 
 
+## O diário da mesa em Lonelog (Markdown), só para o anfitrião: {ok, data: {markdown}, message}.
+func export_lonelog() -> Dictionary:
+	var path := "/api/rooms/%s/lonelog?token=%s" % [str(room.get("id", "")).uri_encode(), _token.uri_encode()]
+	return await _request(HTTPClient.METHOD_GET, path, {})
+
+
 ## Cria uma mesa nova a partir de um arquivo exportado e envia a mídia dela.
 ## `media` mapeia o nome do arquivo (hash) para os bytes. Devolve {ok, code, token, message}.
 func import_room(table: Dictionary, media: Dictionary, host_name: String) -> Dictionary:
@@ -126,6 +133,11 @@ func is_connected_to_room() -> bool:
 
 func send_chat(input: String) -> void:
 	_send({"type": "chat:send", "input": input})
+
+
+## Legenda do que acabei de dizer, só para os outros da mesa (não vai ao histórico).
+func send_caption(text: String) -> void:
+	_send({"type": "speech:caption", "text": text})
 
 
 func send_safety(action: String) -> void:
@@ -457,6 +469,8 @@ func _handle(raw: String) -> void:
 			scene_changed.emit(scene)
 		"audio:fire":
 			audio_fired.emit(str(message["cardId"]))
+		"speech:caption":
+			caption_received.emit(str(message["author"]), str(message["text"]))
 		"compendium:sync":
 			compendiums = message["compendiums"]
 			compendiums_changed.emit(compendiums)

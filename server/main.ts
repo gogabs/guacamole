@@ -24,6 +24,7 @@ import {
   WELCOME_HISTORY,
 } from "./room.ts";
 import { describeUpload, diskMediaStore, MAX_AUDIO_BYTES, MediaError, memoryMediaStore } from "./media.ts";
+import { buildLonelog } from "../core/lonelog.ts";
 import { exportRoom, importRoom, loadRooms, saveRooms } from "./store.ts";
 
 export interface ServerOptions {
@@ -121,6 +122,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     }
   };
   const voiceBuckets = new WeakMap<WebSocket, { tokens: number; at: number }>();
+  /** Intervalo mínimo entre duas legendas da mesma pessoa: ninguém fala mais rápido que isso. */
+  const CAPTION_GAP_MS = 150;
+  const lastCaption = new WeakMap<WebSocket, number>();
 
   const broadcastEntry = (room: RoomRecord, entry: ChatEntry) => {
     broadcast(room.id, { type: "chat:entry", entry });
@@ -289,6 +293,16 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         send(socket, { type: "error", message: text });
         return;
       }
+      if (message.type === "speech:caption") {
+        // Quem ouve a fala já a recebeu em áudio: a legenda só vale para os outros, em ritmo de fala.
+        const now = Date.now();
+        if (now - (lastCaption.get(socket) ?? 0) < CAPTION_GAP_MS) return;
+        lastCaption.set(socket, now);
+        for (const other of connections.get(room.id)?.keys() ?? []) {
+          if (other !== socket) send(other, { type: "speech:caption", author: player.name, text: message.text });
+        }
+        return;
+      }
       if (message.type === "voice:seat") {
         const active = room.scene.scenes.find((s) => s.id === room.scene.activeId);
         const known = message.zoneId === "" || active?.zones.some((z) => z.id === message.zoneId);
@@ -364,6 +378,18 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       if (exportMatch && request.method === "GET") {
         const room = roomFor(decodeURIComponent(exportMatch[1]));
         return room ? exportTable(room, url) : json({ message: "Mesa não encontrada." }, 404);
+      }
+
+      const lonelogMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/lonelog$/);
+      if (lonelogMatch && request.method === "GET") {
+        const room = roomFor(decodeURIComponent(lonelogMatch[1]));
+        if (!room) return json({ message: "Mesa não encontrada." }, 404);
+        if (url.searchParams.get("token") !== room.hostToken) {
+          return json({ message: "Apenas o anfitrião exporta o diário." }, 403);
+        }
+        return json({
+          markdown: buildLonelog({ title: room.name, hostName: room.hostName, entries: room.journal }),
+        });
       }
 
       const mediaMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/media(?:\/([0-9a-f]{64}))?$/);

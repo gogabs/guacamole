@@ -237,6 +237,101 @@ func _voice_tests(table: Control, ana: Node) -> void:
 	voice.set_mode("off")
 
 
+## O áudio de teste (uma frase em português, 16 kHz mono) repetido três vezes por amostra: 48 kHz.
+func _speech_frames() -> PackedVector2Array:
+	var bytes := FileAccess.get_file_as_bytes("res://tests/fala_pt.speech")
+	var at := 12
+	while at + 8 <= bytes.size():
+		var tag := bytes.slice(at, at + 4).get_string_from_ascii()
+		var size := bytes.decode_u32(at + 4)
+		if tag == "data":
+			var frames := PackedVector2Array()
+			for i in size / 2:
+				var v := bytes.decode_s16(at + 8 + i * 2) / 32768.0
+				for _repeat in 3:
+					frames.append(Vector2(v, v))
+			return frames
+		at += 8 + size + size % 2
+	return PackedVector2Array()
+
+
+## Entrega o áudio ao microfone de `voice`, em quadros de 20 ms, seguido de silêncio.
+func _say_into(voice: Node, frames: PackedVector2Array) -> void:
+	var at := 0
+	while at < frames.size():
+		voice.mic_frames.emit(frames.slice(at, at + 960))
+		at += 960
+	for _i in 60:
+		voice.mic_frames.emit(PackedVector2Array(_tone(0.02, 0.0)))
+
+
+func _dictation_tests(table: Control, ana: Node) -> void:
+	# Em tempo de execução: o script usa os autoloads, que ainda não existem ao compilar este teste.
+	var Dictation: GDScript = load("res://scripts/audio/dictation.gd")
+	var dictation: Node = table._dictation
+	_check(Dictation.format_line("Ação: procuro nos arquivos.") == "@ procuro nos arquivos.", "falar \"ação\" anota com @")
+	_check(Dictation.format_line("Pergunta, tem alguém em casa?") == "? tem alguém em casa?", "falar \"pergunta\" anota com ?")
+	_check(Dictation.format_line("resultado sim, mas") == "-> sim, mas" and Dictation.format_line("Consequência. A porta range.") == "=> A porta range.", "resultado e consequência viram -> e =>")
+	_check(Dictation.format_line("Nota: testar a regra") == "(nota: testar a regra)", "falar \"nota\" anota entre parênteses")
+	_check(Dictation.format_line("Eu abro a porta devagar.") == "Eu abro a porta devagar." and Dictation.format_line("Ação") == "Ação", "sem marca é narração, e uma palavra só não vira marca")
+	_check(dictation.available(), "a extensão de ditado carregou")
+	if not dictation.available():
+		return
+
+	var panel: Control = table._audio
+	var kinds: Array = panel._rows.map(func(r: Dictionary) -> String: return r["kind"])
+	_check(kinds.has("voice_dictation") and kinds.has("voice_dictation_model") and kinds.has("voice_captions_read"), "a região de áudio lista o ditado e o modelo")
+	_check(panel._row_text({"kind": "voice_dictation"}) == "Ditado: desligado", "o ditado começa desligado")
+
+	# Legendas: o que Ana diz chega a Caio, na lista e na linha do painel; não volta para Ana.
+	var own: Array = []
+	ana.caption_received.connect(func(author: String, text: String) -> void: own.append([author, text]))
+	ana.send_caption("Eu abro a porta.")
+	_check(await _wait(func() -> bool: return dictation.captions.size() == 1), "Caio recebe a legenda de Ana")
+	_check(dictation.captions[0] == {"author": "Ana", "text": "Eu abro a porta."}, "a legenda leva o autor e o texto")
+	_check(panel._rows.any(func(r: Dictionary) -> bool: return r["kind"] == "voice_caption" and panel._row_text(r) == "Legenda, Ana: Eu abro a porta."), "a legenda aparece na região de áudio")
+	_check(own.is_empty(), "a legenda não volta para quem falou")
+
+	var ready: bool = dictation.model_ready()
+	_check(ready or dictation.set_mode("captions") == "off", "sem o modelo o ditado não liga")
+	if not ready:
+		print("ditado real: pulado (sem o modelo %s)" % dictation.model_path())
+		return
+
+	# Transcrição de verdade: a frase gravada passa pelo Whisper e sai como texto.
+	var frames := _speech_frames()
+	_check(frames.size() > 48000, "o áudio de teste carregou")
+	var voice: Node = table._voice
+	_check(dictation.set_mode("captions") == "captions", "o modo legendas liga com o modelo baixado")
+	var heard: Array = []
+	ana.caption_received.connect(func(author: String, text: String) -> void: heard.append(text))
+	_say_into(voice, frames)
+	_check(await _wait(func() -> bool: return not heard.is_empty(), 60.0), "a fala do microfone vira legenda para Ana")
+	var text := str(heard[0]).to_lower() if not heard.is_empty() else ""
+	print("transcrição: ", text)
+	_check(text.contains("porta") and text.contains("biblioteca"), "a legenda diz o que foi falado: %s" % text)
+
+	# Diário: a frase espera confirmação; F5 aceita e ela vira mensagem de Caio no chat.
+	var before: int = table.entries.size()
+	_check(dictation.set_mode("diary") == "diary", "o modo diário liga")
+	_say_into(voice, frames)
+	_check(await _wait(func() -> bool: return not dictation.pending().is_empty(), 60.0), "a frase espera a confirmação")
+	_check(table.entries.size() == before, "nada vai ao chat antes de aceitar")
+	dictation.discard()
+	_check(dictation.pending().is_empty() and table.entries.size() == before, "F6 descarta a frase")
+	_say_into(voice, frames)
+	_check(await _wait(func() -> bool: return not dictation.pending().is_empty(), 60.0), "a frase seguinte também espera")
+	dictation.accept()
+	_check(await _wait(func() -> bool: return table.entries.size() == before + 1 and str(table.entries[-1]["text"]).to_lower().contains("porta")), "F5 aceita e a frase vai ao chat")
+
+	# Sem confirmar: vai direto.
+	_check(dictation.set_mode("auto") == "auto", "o modo sem confirmar liga")
+	_say_into(voice, frames)
+	_check(await _wait(func() -> bool: return table.entries.size() == before + 2, 60.0), "sem confirmar a frase vai direto ao chat")
+	dictation.set_mode("off")
+	_check(dictation.mode == "off" and panel._row_text({"kind": "voice_dictation"}) == "Ditado: desligado", "desligar o ditado fecha o microfone")
+
+
 func _updater_tests() -> void:
 	const Updater := preload("res://scripts/net/updater.gd")
 	_check(Updater.is_newer("0.2.0", "0.1.9") and Updater.is_newer("v1.0.0", "0.9.9") and Updater.is_newer("0.1.10", "0.1.9"), "versões novas são reconhecidas")
@@ -792,6 +887,7 @@ func _run() -> void:
 	scene_panel._zone.grab_focus()
 	DirAccess.remove_absolute(wav_path)
 	await _voice_tests(table, ana)
+	await _dictation_tests(table, ana)
 
 	# Contador, temporizador e tabela: Ana cria, Caio usa pelo teclado.
 	ana.scene_op({"type": "card:add", "id": "vidas", "title": "Vidas", "text": "", "kind": "counter", "min": 0, "max": 5, "value": 3})

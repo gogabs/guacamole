@@ -21,6 +21,8 @@ import type { MediaInfo } from "./media.ts";
 
 export const MAX_HISTORY = 500;
 export const WELCOME_HISTORY = 200;
+/** O diário guarda bem mais que o chat: é dele que sai o registro Lonelog da campanha. */
+export const MAX_JOURNAL = 20000;
 
 export interface RoomRecord {
   id: string;
@@ -31,6 +33,8 @@ export interface RoomRecord {
   allowedNames: string[];
   createdAt: string;
   history: ChatEntry[];
+  /** Tudo que entrou no histórico (menos rolagens privadas), sem o limite curto do chat. */
+  journal: ChatEntry[];
   nextSeq: number;
   characters: RoomCharacter[];
   scene: SceneState;
@@ -57,6 +61,7 @@ export function createRoomRecord(
     allowedNames: [],
     createdAt: new Date().toISOString(),
     history: [],
+    journal: [],
     nextSeq: 1,
     characters: [],
     scene: createSceneState(),
@@ -96,6 +101,10 @@ export function pushEntry(room: RoomRecord, draft: EntryDraft): ChatEntry {
   room.history.push(entry);
   if (room.history.length > MAX_HISTORY) {
     room.history.splice(0, room.history.length - MAX_HISTORY);
+  }
+  room.journal.push(entry);
+  if (room.journal.length > MAX_JOURNAL) {
+    room.journal.splice(0, room.journal.length - MAX_JOURNAL);
   }
   return entry;
 }
@@ -303,6 +312,7 @@ export function handleClientMessage(
 ): MessageOutcome {
   if (message.type === "scene:op") {
     try {
+      const previousScene = room.scene.activeId;
       const result = applySceneOp(
         room.scene,
         message.op,
@@ -314,11 +324,16 @@ export function handleClientMessage(
       );
       room.scene = result.state;
       const text = result.message(player.name);
+      const entry = text ? systemEntry(room, text) : undefined;
+      const active = room.scene.scenes.find((s) => s.id === room.scene.activeId);
+      if (entry && active && room.scene.activeId !== previousScene) {
+        entry.scene = { name: active.name, description: active.description };
+      }
       return {
         // Um efeito disparado não muda a cena: só avisa quem está ouvindo.
         scene: result.fired ? undefined : room.scene,
         fired: result.fired,
-        entry: text ? systemEntry(room, text) : undefined,
+        entry,
       };
     } catch (error) {
       if (error instanceof SceneError) return { error: error.message };

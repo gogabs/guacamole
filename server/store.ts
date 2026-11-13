@@ -55,6 +55,7 @@ export function exportRoom(room: RoomRecord, includeHistory: boolean): Record<st
       compendiums: room.compendiums,
       media: room.media,
       history: includeHistory ? room.history : [],
+      journal: includeHistory ? room.journal : [],
       nextSeq: includeHistory ? room.nextSeq : 1,
     },
   };
@@ -110,6 +111,8 @@ function normalizeRoom(value: unknown): RoomRecord | null {
       : [],
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     history: history as RoomRecord["history"],
+    // Mesas salvas antes do diário começam com o que ainda restava do chat.
+    journal: (Array.isArray(raw.journal) ? raw.journal : history) as RoomRecord["journal"],
     nextSeq: typeof raw.nextSeq === "number" ? raw.nextSeq : history.length + 1,
     characters: Array.isArray(raw.characters)
       ? (raw.characters as RoomRecord["characters"]).map(normalizeCharacter)

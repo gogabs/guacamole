@@ -18,7 +18,9 @@ const MODE_ORDER := ["music", "ambient", "effect"]
 
 const HELP := (
 	"Áudio. Setas navegam, esquerda e direita mudam o volume. Voz: Enter nas linhas de voz muda o modo, "
-	+ "a supressão e os dispositivos; no push-to-talk, segure F4 para falar. Anfitrião: Enter toca ou para, "
+	+ "a supressão e os dispositivos; no push-to-talk, segure F4 para falar. "
+		+ "Ditado: Enter na linha do ditado troca entre desligado, legendas para a mesa e diário (F5 aceita a frase, F6 descarta); "
+		+ "falar ação, pergunta, resultado, consequência ou nota no começo anota em Lonelog. Anfitrião: Enter toca ou para, "
 	+ "1 a 9 disparam efeitos, Shift mais número dá a tecla ao som, L liga o loop, M troca o modo, "
 	+ "P põe o som numa zona, G posiciona o som num ponto exato da zona, E renomeia, Delete remove, V oculta ou revela."
 )
@@ -26,6 +28,7 @@ const HELP := (
 var _client: Node
 var _engine: Node
 var _voice: Node
+var _dictation: Node
 var _zone: PanelContainer
 var _view: RichTextLabel
 var _edit: LineEdit
@@ -53,10 +56,11 @@ func focus_zone() -> Control:
 	return _zone
 
 
-func setup(client: Node, engine: Node, voice: Node) -> void:
+func setup(client: Node, engine: Node, voice: Node, dictation: Node = null) -> void:
 	_client = client
 	_engine = engine
 	_voice = voice
+	_dictation = dictation
 
 
 func _ready() -> void:
@@ -86,6 +90,10 @@ func _ready() -> void:
 	_voice.speakers_changed.connect(func() -> void:
 		if _mode == "browse":
 			_rebuild())
+	if _dictation != null:
+		_dictation.changed.connect(func() -> void:
+			if _mode == "browse":
+				_rebuild())
 	_rebuild()
 
 
@@ -132,6 +140,13 @@ func _rebuild() -> void:
 	if _voice.available():
 		for kind in ["voice_mode", "voice_positional", "voice_noise", "voice_normalize", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_speakers"]:
 			_rows.append({"kind": kind})
+		if _dictation != null and _dictation.available():
+			for kind in ["voice_dictation", "voice_dictation_model", "voice_captions_read"]:
+				_rows.append({"kind": kind})
+			var shown: Array = _dictation.captions.slice(-10)
+			shown.reverse()
+			for caption in shown:
+				_rows.append({"kind": "voice_caption", "author": caption["author"], "text": caption["text"]})
 	else:
 		_rows.append({"kind": "header", "text": "Voz indisponível: a extensão de voz não foi carregada."})
 	if _is_host():
@@ -191,6 +206,15 @@ func _row_text(row: Dictionary) -> String:
 		"voice_speakers":
 			var names: Array = _voice.speakers()
 			return "Falando agora: %s" % ", ".join(names) if not names.is_empty() else "Ninguém falando"
+		"voice_dictation":
+			var hint: String = ", F5 aceita e F6 descarta cada frase" if _dictation.mode == "diary" else ""
+			return "Ditado: %s%s" % [_dictation.MODE_NAMES[_dictation.mode], hint]
+		"voice_dictation_model":
+			return _dictation.model_text()
+		"voice_captions_read":
+			return "Ler em voz alta as legendas dos outros: %s" % ("sim" if _dictation.read_captions else "não")
+		"voice_caption":
+			return "Legenda, %s: %s" % [row["author"], row["text"]]
 		"stop_all":
 			return "Parar todos os sons"
 		"new_audio":
@@ -218,9 +242,9 @@ func _row_text(row: Dictionary) -> String:
 
 func _is_button(row: Dictionary) -> bool:
 	match row["kind"]:
-		"header", "voice_speakers":
+		"header", "voice_speakers", "voice_caption":
 			return false
-		"master", "position", "voice_mode", "voice_positional", "voice_noise", "voice_normalize", "voice_in", "voice_out", "voice_volume", "voice_announce":
+		"master", "position", "voice_mode", "voice_positional", "voice_noise", "voice_normalize", "voice_in", "voice_out", "voice_volume", "voice_announce", "voice_dictation", "voice_dictation_model", "voice_captions_read":
 			return true
 		_:
 			return _is_host()
@@ -453,7 +477,25 @@ func _activate(row: Dictionary) -> void:
 			_choose_device("Qual microfone?", _voice.input_devices(), AudioServer.input_device, _voice.set_input_device, row)
 		"voice_out":
 			_choose_device("Por onde tocar as vozes?", _voice.output_devices(), AudioServer.output_device, _voice.set_output_device, row)
-		"voice_volume", "voice_speakers":
+		"voice_dictation":
+			var before: String = _dictation.mode
+			var after: String = _dictation.cycle_mode()
+			if after == before:
+				Sfx.play("error")
+				Speech.say("Baixe o modelo de voz primeiro: use a linha do modelo.", true)
+				return
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_dictation_model":
+			if _dictation.model_ready():
+				Speech.say(_row_text(row), true)
+			elif not _dictation.downloading():
+				_dictation.download_model()
+		"voice_captions_read":
+			_dictation.set_read_captions(not _dictation.read_captions)
+			_rebuild()
+			Speech.say(_row_text(row), true)
+		"voice_volume", "voice_speakers", "voice_caption":
 			Speech.say(_row_text(row), true)
 		"stop_all":
 			if _need_host():

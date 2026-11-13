@@ -32,6 +32,20 @@ const SAFETY_COMMANDS: Record<string, SafetyAction> = {
   avançar: "forward",
 };
 
+/** Atalhos para anotar no diário em Lonelog sem digitar os símbolos. */
+const LONELOG_COMMANDS: Record<string, { what: string; format: (text: string) => string }> = {};
+for (
+  const [names, what, format] of [
+    [["a", "acao", "ação"], "uma ação", (t: string) => `@ ${t}`],
+    [["q", "pergunta"], "uma pergunta ao oráculo", (t: string) => `? ${t}`],
+    [["res", "resultado"], "um resultado", (t: string) => `-> ${t}`],
+    [["c", "consequencia", "consequência"], "uma consequência", (t: string) => `=> ${t}`],
+    [["n", "nota"], "uma nota", (t: string) => `(nota: ${t})`],
+  ] as Array<[string[], string, (text: string) => string]>
+) {
+  for (const name of names) LONELOG_COMMANDS[name] = { what, format };
+}
+
 /**
  * Interpreta uma linha digitada no chat. Texto comum vira mensagem; comandos
  * começados por `/` viram rolagens ou sinais de segurança já resolvidos.
@@ -50,6 +64,12 @@ export function runChatInput(input: string, rng: Rng = defaultRng): ChatResult {
 
   const safety = SAFETY_COMMANDS[command];
   if (safety) return { type: "safety", action: safety, text: safetyLabel(safety) };
+
+  const lonelog = LONELOG_COMMANDS[command];
+  if (lonelog) {
+    if (!args) return { type: "error", message: `Uso: /${command} texto (anota ${lonelog.what} no diário).` };
+    return { type: "text", content: lonelog.format(args) };
+  }
 
   switch (command) {
     case "r":

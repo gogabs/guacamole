@@ -6,6 +6,7 @@
 
 mod head_model;
 mod sound;
+mod transcribe;
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -515,5 +516,114 @@ impl VoiceCodec {
         self.level = 0.0;
         self.decoders.clear();
         self.hrtf_voices.clear();
+    }
+}
+
+/// Transcricao de fala local (Whisper). `start` carrega o modelo numa thread; `push` recebe o que o
+/// microfone capta; `poll` devolve os textos de cada trecho de fala ja transcrito.
+#[derive(GodotClass)]
+#[class(base = RefCounted)]
+struct Transcriber {
+    worker: Option<transcribe::Worker>,
+    down: Option<transcribe::Downsampler>,
+    ready: bool,
+    texts: Vec<String>,
+    error: GString,
+    base: Base<RefCounted>,
+}
+
+#[godot_api]
+impl IRefCounted for Transcriber {
+    fn init(base: Base<RefCounted>) -> Self {
+        Self { worker: None, down: None, ready: false, texts: Vec::new(), error: GString::new(), base }
+    }
+}
+
+#[godot_api]
+impl Transcriber {
+    /// Comeca a carregar o modelo (arquivo ggml) e a ouvir; `rate` e a taxa do que chega em `push`.
+    #[func]
+    fn start(&mut self, model: GString, language: GString, rate: f64) -> bool {
+        self.stop();
+        if !std::path::Path::new(&model.to_string()).is_file() {
+            self.error = "O modelo de voz nao foi encontrado.".into();
+            return false;
+        }
+        let threads = std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(2).clamp(2, 6);
+        self.worker = Some(transcribe::Worker::start(model.to_string(), language.to_string(), threads as i32));
+        self.down = Some(transcribe::Downsampler::new(rate as f32));
+        self.ready = false;
+        self.error = GString::new();
+        true
+    }
+
+    #[func]
+    fn stop(&mut self) {
+        self.worker = None; // o Drop encerra a thread
+        self.down = None;
+        self.ready = false;
+    }
+
+    /// Entrega quadros do microfone (estereo, na taxa dada em `start`).
+    #[func]
+    fn push(&mut self, frames: PackedVector2Array) {
+        let (Some(worker), Some(down)) = (&self.worker, &mut self.down) else { return };
+        let mono: Vec<f32> = frames.as_slice().iter().map(|v| (v.x + v.y) * 0.5).collect();
+        let samples = down.process(&mono);
+        if !samples.is_empty() {
+            worker.push(samples);
+        }
+    }
+
+    /// Encerra o trecho de fala em andamento, se houver, e o transcreve.
+    #[func]
+    fn flush(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.flush();
+        }
+    }
+
+    /// Os textos prontos desde a ultima chamada.
+    #[func]
+    fn poll(&mut self) -> PackedStringArray {
+        self.drain();
+        let mut texts = PackedStringArray::new();
+        for text in self.texts.drain(..) {
+            texts.push(text.as_str());
+        }
+        texts
+    }
+
+    /// O modelo terminou de carregar.
+    #[func]
+    fn is_ready(&mut self) -> bool {
+        self.drain();
+        self.ready
+    }
+
+    /// A ultima falha, ou vazio.
+    #[func]
+    fn last_error(&mut self) -> GString {
+        self.drain();
+        self.error.clone()
+    }
+}
+
+impl Transcriber {
+    /// Passa os eventos da thread para o estado desta classe.
+    fn drain(&mut self) {
+        let Some(worker) = &self.worker else { return };
+        for event in worker.poll() {
+            match event {
+                transcribe::Event::Ready => self.ready = true,
+                transcribe::Event::Failed(message) => {
+                    self.error = message.as_str().into();
+                    self.ready = false;
+                    self.worker = None;
+                    return;
+                }
+                transcribe::Event::Text(text) => self.texts.push(text),
+            }
+        }
     }
 }

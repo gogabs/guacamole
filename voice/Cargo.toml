@@ -12,6 +12,7 @@ godot = "0.5"
 hrtf = "0.10"
 nnnoiseless = "0.5"
 opus = "0.3"
+whisper-rs = { version = "0.16", default-features = false }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "ogg", "vorbis", "wav", "pcm"] }
 
 [profile.release]

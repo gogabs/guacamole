@@ -47,6 +47,8 @@ export interface ChatEntry {
   action?: SafetyAction;
   /** Rolagem privada: enviada só a quem rolou, fora do histórico da mesa. */
   private?: boolean;
+  /** Presente quando esta entrada troca a cena ativa; o diário abre uma cena nova aqui. */
+  scene?: { name: string; description: string };
 }
 
 /** Ficha vinda de arquivo. `id` é reaproveitado se estiver livre na mesa. */
@@ -92,6 +94,8 @@ export type ClientMessage =
   | { type: "scene:op"; op: SceneOp }
   /** Senta numa zona da cena ("" levanta): a voz de cada um soa de onde ele está. */
   | { type: "voice:seat"; zoneId: string }
+  /** Legenda do que a pessoa acabou de dizer, transcrita no computador dela; os outros a recebem, sem histórico. */
+  | { type: "speech:caption"; text: string }
   /** Qualquer um adiciona um compêndio à mesa; só o anfitrião o tira. */
   | { type: "compendium:add"; compendiumId: string }
   | { type: "compendium:remove"; compendiumId: string }
@@ -134,12 +138,15 @@ export type ServerMessage =
   | { type: "presence:sync"; players: Player[] }
   /** Zona em que cada participante está sentado (nome do jogador para id da zona). */
   | { type: "voice:seats"; seats: Record<string, string> }
+  /** Legenda de quem falou, só para os outros da mesa; não entra no histórico. */
+  | { type: "speech:caption"; author: string; text: string }
   | { type: "room:sync"; room: RoomSummary }
   | { type: "error"; message: string };
 
 export class ProtocolError extends Error {}
 
 export const MAX_MESSAGE_BYTES = 65536;
+export const MAX_CAPTION = 400;
 
 function parseOracleTarget(raw: unknown): OracleTarget | null {
   if (typeof raw !== "object" || raw === null) return null;
@@ -176,6 +183,12 @@ export function parseClientMessage(data: string): ClientMessage {
     (SAFETY_ACTIONS as readonly string[]).includes(message.action)
   ) {
     return { type: "safety:signal", action: message.action as SafetyAction };
+  }
+
+  if (message.type === "speech:caption") {
+    const text = typeof message.text === "string" ? message.text.replace(/\s+/g, " ").trim().slice(0, MAX_CAPTION) : "";
+    if (text) return { type: "speech:caption", text };
+    throw new ProtocolError("Legenda vazia.");
   }
 
   const str = (key: string): string | null => {

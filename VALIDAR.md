@@ -91,6 +91,26 @@ Marque ao validar e apague o que já foi confirmado.
 - [ ] Atraso aceitável e sem cortes com 3 ou 4 pessoas, pela internet (Radmin) e na rede local.
 - [ ] O pacote do cliente leva a DLL de voz e funciona em outro computador (sem instalar nada).
 
+## Diário em Lonelog
+- [ ] Cena (anfitrião), "Salvar o diário da sessão (Lonelog)": abre o diálogo de salvar e grava um `.md`.
+- [ ] O arquivo abre bem num editor Markdown: cabeçalho YAML, `## Sessão`, `### S1 *Cena*`, a notação em blocos de código e a narração em texto comum.
+- [ ] Atalhos no chat: `/a` (ação, `@`), `/q` (pergunta, `?`), `/res` (resultado, `->`), `/c` (consequência, `=>`) e `/n` (nota) aparecem certos no diário.
+- [ ] Rolagens de Fate, Ironsworn, Dungeon World e de oráculos viram linhas `d:` e `tbl:` que fazem sentido para quem conhece o Lonelog.
+- [ ] Trocar de cena abre uma cena nova no diário; uma pausa de horas abre outra sessão.
+- [ ] Rolagens privadas e mensagens de sistema comuns não aparecem; relógios entram como `[Clock:Nome 3/6]`.
+- [ ] Uma campanha longa (mais de 500 mensagens) exporta inteira, além do que o chat ainda mostra.
+
+## Ditado e legendas
+- [ ] Região Áudio, "Modelo de voz": Enter baixa o modelo (cerca de 142 MB), a fala avisa de 20 em 20% e a linha passa a "pronto".
+- [ ] "Ditado": Enter troca entre desligado, legendas para a mesa, diário confirmando e diário sem confirmar; sem o modelo avisa que é preciso baixá-lo.
+- [ ] Ditado em português: a frase falada vira texto com poucos erros, mesmo com ventilador ou teclado ao fundo; a primeira frase pode demorar um pouco enquanto o modelo carrega.
+- [ ] Diário confirmando: a fala lê "Ouvi: ..."; F5 manda ao chat, F6 descarta, e as frases seguintes esperam na fila.
+- [ ] Falar "ação", "pergunta", "resultado", "consequência" ou "nota" no começo da frase anota com `@`, `?`, `->`, `=>` ou `(nota: )` no diário.
+- [ ] Legendas para a mesa: o que você fala aparece para os outros em "Legenda, Nome: texto", sem entrar no histórico nem no diário.
+- [ ] "Ler em voz alta as legendas dos outros" (desligado por padrão) fala cada legenda sem atropelar a navegação.
+- [ ] O uso de CPU durante o ditado, com voz e HRTF ligados, é aceitável; o jogo não engasga.
+- [ ] Ditado e voz juntos: o microfone fica aberto para os dois, e desligar o ditado não derruba a voz.
+
 ## Pacote do cliente
 - [ ] `dist/Guacamole-cliente-windows.zip` abre em outro computador, fala pelo leitor de tela e conecta ao servidor.
 - [ ] O pacote foi gerado com o modelo de exportação 4.7.1 e o editor 4.7.2; se algo estranho aparecer, reexportar com o modelo 4.7.2.
